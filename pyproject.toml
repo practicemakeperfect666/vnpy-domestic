@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "vnpy-domestic"
+version = "0.1.0"
+description = "面向国内期货的 vnpy 增强扩展包"
+requires-python = ">=3.10"
+dependencies = [
+    "vnpy",
+    "numpy",
+    "pandas",
+    "akshare",
+    "requests",
+    "psutil",
+    "pyyaml",
+]

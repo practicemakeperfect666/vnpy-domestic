@@ -1,0 +1,24 @@
+# vnpy-domestic — 运行时数据/配置目录
+.vntrader/*
+!.vntrader/vt_setting.json
+!.vntrader/cta_strategy_setting.json
+!.vntrader/trading_times.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# uv
+uv.lock
