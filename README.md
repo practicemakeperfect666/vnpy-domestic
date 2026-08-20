@@ -2,7 +2,7 @@
   <br>
   <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python" alt="Python">
   <img src="https://img.shields.io/badge/vnpy-4.4.0-blue?style=flat-square" alt="vnpy">
-  <img src="https://img.shields.io/badge/version-0.3.0-brightgreen?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.1.1-brightgreen?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="License">
   <br><br>
 
@@ -14,7 +14,7 @@
 
 ---
 
-## v0.3.0 更新（2026-08-20）
+## v0.1.1 更新（2026-08-20）
 
 - **飞书 HTTP 回调控制**：群里 @机器人 停止/重启实盘策略（`feishu_http_control.py`），父进程常驻、验签 + `message_id` 去重、reply 直连绕过代理
 - **持仓批次 FIFO**：`position_lots.py` 提供 `settle_close`，按交易所规则平仓——DCE/CZCE/GFEX 先开先平、CFFEX 先平今、SHFE/INE 平今平昨
@@ -22,11 +22,6 @@
 - **MultiLayer 策略文档**：新增 `strategies/multi_layer.md`
 - **Linux 部署文档**：新增 `vnpy-domestic-Linux部署.md`（systemd + CTP 凭证环境变量注入）
 - **逐日盯市核算**：RolloverCtaEngine 集成 `settle_close` 持仓批次，历史仓按昨结算、当日仓按开仓价
-
----
-
-## v0.2.0 更新（2026-08-07）
-
 - **MultiLayerStrategy V3**：双向逐层网格策略（RSI 超卖做多、超买做空），每层独立止盈止损，上层必须先止损才开下层
 - **平仓单追踪**：发平仓单后异步等待成交确认（`on_trade` 重置状态），避免误判已平仓
 - **平仓快速成交**：卖单 -3 跳、买单 +3 跳，用当前 bar close 发单不等收盘
@@ -323,7 +318,7 @@ python run_cta.py
 
 **换月逻辑：** 使用新浪财经 API 按持仓量匹配主力——请求 `nf_XXX0` 连续合约和 24 个月合约，持仓量一致的即为主力。换月执行前先 `get_contract` 验证新合约存在，不存在则跳过不动状态。换月检查分三个时机：初始化时静默记录（`_check_rollover_for_init`）、初始化后汇总推送（`send_rollover_init_summary`）、平仓 pos=0 时即时检查（`_check_and_notify_rollover`）。
 
-**订单通知（v0.2.0）：**
+**订单通知：**
 
 | 订单状态 | 通知 |
 |:---|:---|
@@ -345,7 +340,7 @@ python run_cta.py
 
 钉钉（HMAC-SHA256）和飞书（Webhook）统一通知。配置优先级：显式传入 > `secrets.yaml` > 类默认值，YAML 按当前目录、包目录、用户家目录依次搜索。速率限制当前关闭（设 `_min_send_interval` 可启用）。提供启动/关闭通知、系统硬件信息（CPU/内存/磁盘/运行时间）、账户报告（动态权益/可用资金/持仓/活跃挂单列表）、策略状态分批汇总等预置方法。
 
-**账户报告 v0.2.0：** 新增活跃挂单列表（合约、方向、价格、已成交/总数量、状态），由 `main_engine.get_all_active_orders()` 实时查询。
+**账户报告：** 新增活跃挂单列表（合约、方向、价格、已成交/总数量、状态），由 `main_engine.get_all_active_orders()` 实时查询。
 
 **每日订单状态统计：** 账户报告自动附带当日订单状态汇总（提交中/未成交/部分成交/全部成交/已撤销/被拒），按自然日自动清零。数据由 `RolloverCtaEngine` 在 `process_order_event` 中实时统计，`get_daily_order_stats()` 供 `run_cta.py` 调用后传入 `send_account_report`。
 

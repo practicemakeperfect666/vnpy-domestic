@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "vnpy-domestic"
-version = "0.3.0"
+version = "0.1.1"
 description = "面向国内期货的 vnpy 增强扩展包"
 requires-python = ">=3.10"
 dependencies = [
