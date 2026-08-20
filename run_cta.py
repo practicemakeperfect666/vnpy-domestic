@@ -288,7 +288,7 @@ def run_parent() -> None:
                         print("⚠️ 子进程未自动退出，强制终止...")
                         child_process.terminate()
                         child_process.join(timeout=5)
-                        child_process = None
+                    child_process = None
 
             if child_process is not None and not child_process.is_alive():
                 print("⚠️ 子进程意外退出")
