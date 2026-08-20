@@ -18,7 +18,7 @@ from vnpy_domestic import MyBarGenerator
 class SaveStrategy(CtaTemplate):
     """保存 K 线数据的示例策略"""
 
-    author = "用Python的交易员"
+    author = "vnpy-domestic"
 
     # 参数
     save_bar: bool = True

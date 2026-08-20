@@ -112,6 +112,17 @@ WantedBy=multi-user.target
 EOF
 ```
 
+**unit 文件关键字段：**
+
+| 字段 | 作用 |
+|:-----|:-----|
+| `ConditionEnvironment=CTP_USER` | 凭证未注入时不启动（配合开机自启，静默跳过不报错） |
+| `After=network-online.target` | 等网络就绪再启动（CTP 需要网络） |
+| `Restart=always` + `RestartSec=10` | 崩溃后 10 秒自动重启 |
+| `User=ubuntu` / `WorkingDirectory` | 运行用户与项目目录 |
+| `ExecStart` | 用 conda 环境的 python 跑 run_cta.py |
+| `StandardOutput/Error=journal` | 日志进 journald，用 `journalctl -u vnpy-cta` 查看 |
+
 ## 7. 启动
 
 ```bash
