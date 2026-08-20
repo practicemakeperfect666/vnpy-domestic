@@ -3,9 +3,9 @@
 ## 环境假设
 
 - 服务器 IP：192.168.1.100（示例）
-- 用户名：youruser
-- 项目路径：/home/youruser/vnpy-domestic
-- conda 路径：/home/youruser/miniconda3
+- 用户名：ubuntu
+- 项目路径：/home/ubuntu/vnpy-domestic
+- conda 路径：/home/ubuntu/miniconda3
 - conda 环境名：vnpy
 
 ---
@@ -30,7 +30,7 @@ conda activate vnpy
 
 ```bash
 cd ~
-git clone https://github.com/你的用户名/vnpy-domestic.git
+git clone https://github.com/practicemakeperfect666/vnpy-domestic.git
 cd vnpy-domestic
 ```
 
@@ -99,9 +99,9 @@ ConditionEnvironment=CTP_USER
 
 [Service]
 Type=simple
-User=youruser
-WorkingDirectory=/home/youruser/vnpy-domestic
-ExecStart=/home/youruser/miniconda3/envs/vnpy/bin/python /home/youruser/vnpy-domestic/run_cta.py
+User=ubuntu
+WorkingDirectory=/home/ubuntu/vnpy-domestic
+ExecStart=/home/ubuntu/miniconda3/envs/vnpy/bin/python /home/ubuntu/vnpy-domestic/run_cta.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -177,7 +177,7 @@ journalctl -u vnpy-cta -n 50 | grep -E "(连接|订阅|换月|init)"
 | CTP 连不上 | ping 182.254.243.31，检查防火墙 |
 | 环境变量没读到 | `sudo systemctl show vnpy-cta -p Environment` |
 | conda python 找不到 | `ls ~/miniconda3/envs/vnpy/bin/python` |
-| 权限问题 | chown youruser:youruser ~/vnpy-domestic -R |
+| 权限问题 | chown ubuntu:ubuntu ~/vnpy-domestic -R |
 
 ---
 
