@@ -18,17 +18,11 @@
 
 - **飞书 HTTP 回调控制**：群里 @机器人 停止/重启实盘策略（`feishu_http_control.py`），父进程常驻、验签 + `message_id` 去重、reply 直连绕过代理
 - **持仓批次 FIFO**：`position_lots.py` 提供 `settle_close`，按交易所规则平仓——DCE/CZCE/GFEX 先开先平、CFFEX 先平今、SHFE/INE 平今平昨
-- **玉米刷盘口策略**：`CornScalperStrategy`（`corn_scalper.py`），MA 判向 + 盘口深度过滤 + 被套反向锁仓
-- **MultiLayer 策略文档**：新增 `strategies/multi_layer.md`
 - **Linux 部署文档**：新增 `vnpy-domestic-Linux部署.md`（systemd + CTP 凭证环境变量注入）
 - **逐日盯市核算**：RolloverCtaEngine 集成 `settle_close` 持仓批次，历史仓按昨结算、当日仓按开仓价
-- **MultiLayerStrategy V3**：双向逐层网格策略（RSI 超卖做多、超买做空），每层独立止盈止损，上层必须先止损才开下层
-- **平仓单追踪**：发平仓单后异步等待成交确认（`on_trade` 重置状态），避免误判已平仓
-- **平仓快速成交**：卖单 -3 跳、买单 +3 跳，用当前 bar close 发单不等收盘
 - **订单通知**：平仓单挂出推飞书；NOTTRADED 引擎层去重推送；被拒/失效推送
 - **延迟计算**：所有订单统一统计延迟（含挂单排队时间）；取消自动暂停开仓；修复时区减法崩溃
 - **账户报告**：新增活跃挂单列表（合约、方向、价格、成交量、状态）
-- **状态持久化**：`layer_state` 属性保存开仓层级/价格/方向，重启恢复
 - **空 JSON 修复**：`run_cta.py` 启动前自动修复 vnpy 空数据文件崩溃
 
 ---
@@ -59,8 +53,6 @@ vnpy-domestic 是一个面向国内期货实盘的 vnpy 扩展工具包。它不
 | `TradingTime Updater` | `update_trading_times.py` | 交易时段拉取与 CSV 持久化 |
 | `FeishuControl` | `feishu_http_control.py` | 飞书 HTTP 回调控制（@机器人 停止/重启） |
 | `PositionLots` | `position_lots.py` | 持仓批次 FIFO + 平今平昨规则 |
-| `MultiLayerStrategy` | `strategies/multi_layer.py` | 双向逐层网格策略（详见 `multi_layer.md`） |
-| `CornScalperStrategy` | `strategies/corn_scalper.py` | 玉米刷盘口策略（MA 判向 + 盘口深度过滤 + 被套锁仓） |
 
 ---
 
@@ -360,16 +352,6 @@ python run_cta.py
 
 `settle_close(lots, exchange, offset, qty)` 按交易所规则平仓：DCE/CZCE/GFEX 先开先平、CFFEX 先平今、SHFE/INE 平今平昨（涨停先平昨）。`trading_day(dt)` 提供交易日判定。逐日盯市核算中，历史仓按昨结算、当日仓按开仓价。
 
-### MultiLayerStrategy
-
-双向逐层网格策略。详见 `strategies/multi_layer.md`。
-
-核心逻辑：RSI 超卖（< `rsi_entry`）做多逐层补仓，RSI 超买（> `rsi_exit`）做空逐层补仓。每层独立止盈止损，上层必须先止损才开下层。出场条件：RSI 反向 + MA20 穿越 + 急变保护。平仓单逾期自动追价（±3 跳，每单仅追一次），成交确认异步重置状态。
-
-### CornScalperStrategy
-
-玉米刷盘口策略。核心：买一开多 → 卖一平、卖一开空 → 买一平，赚买卖价差。被套后开反向锁仓单对冲敞口，继续刷反向价差，直到盘口回到成本价才挂平仓单解套（随缘）。多空分别记录 `long_pos`/`short_pos`（锁仓净持仓=0 不误判空仓）。开仓单盘口变薄（< `min_depth`）撤单等厚重挂，平仓单价格反向 `deviation_ticks` 跳撤单追价。收盘前 3 分钟撤单强平。
-
 ---
 
 ## 守护进程
@@ -419,9 +401,6 @@ vnpy-domestic/
 │       └── RolloverCtaEngine.py        ← 自动换月 + 通知 + P&L + 断连监控
 │
 └── strategies/
-    ├── multi_layer.py                  ← 双向逐层网格策略（V3）
-    ├── multi_layer.md                  ← 策略详细文档
-    ├── corn_scalper.py                 ← 玉米刷盘口策略
     ├── dual_ma.py                      ← 双均线策略
     └── save_bar.py                     ← K 线落盘
 ```
