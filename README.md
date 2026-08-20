@@ -300,6 +300,8 @@ python run_cta.py
 
 `run_parent()` 先确认环境变量存在，然后 `run_and_save()` 更新交易时段，最后按 `check_trading_period()` 的时段判断启停子进程。子进程内 `load_ctp_setting()` 在函数内读取环境变量，避免 Windows spawn 的模块级重入问题。
 
+Linux 服务器部署（systemd 守护 + CTP 凭证环境变量注入）见 `vnpy-domestic-Linux部署.md`。
+
 ---
 
 ## 模块
@@ -378,6 +380,8 @@ run_child()
 vnpy-domestic/
 ├── run_cta.py                          ← 实盘入口（守护进程）
 ├── README.md                           ← 本文件
+├── vnpy-domestic-Linux部署.md           ← Linux 服务器部署
+├── vnpy-domestic-飞书控制机器人.md      ← 飞书控制机器人部署
 ├── pyproject.toml                      ← 包配置
 ├── .gitignore                          ← 保护 .vntrader/
 │
