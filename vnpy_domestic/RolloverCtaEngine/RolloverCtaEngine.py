@@ -716,6 +716,13 @@ class RolloverCtaEngine(CtaEngine):
         for idx, batch in enumerate(batches, start=1):
             self.notify.send_status_summary(batch, total, idx, seq=self._status_seq)
 
+    def reset_daily_pl(self) -> None:
+        """每日收盘归零累计盈亏：次日从 0 起统计当日盈亏（隔夜持仓按逐日盯市已结算，不影响）"""
+        for name, strategy in self.strategies.items():
+            if hasattr(strategy, "realized_pl"):
+                strategy.realized_pl = 0.0
+            self.strategy_cumulative_pl[name] = 0.0
+
     # ----------------------------------------------------------------------
     # _init_strategy — 初始化前检查换月（仅记录结果，不发通知）
     # ----------------------------------------------------------------------
