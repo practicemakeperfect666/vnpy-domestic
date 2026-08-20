@@ -37,6 +37,11 @@ cd vnpy-domestic
 ## 4. 安装依赖
 
 ```bash
+# ⚠️ 先装编译工具链：vnpy_ctp 是源码包（tar.gz），需要 g++ 编译，缺了会报
+#   "Unknown compiler(s): c++, g++, clang++..."
+sudo apt update
+sudo apt install -y build-essential ninja-build
+
 # vnpy 核心
 pip install vnpy vnpy_ctastrategy vnpy_ctp vnpy_sqlite
 
