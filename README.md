@@ -17,13 +17,17 @@
 ## v0.1.1 更新（2026-08-20）
 
 - **飞书 HTTP 回调控制**：群里 @机器人 停止/重启实盘策略（`feishu_http_control.py`），父进程常驻、验签 + `message_id` 去重、reply 直连绕过代理
+- **飞书控制机器人文档**：新增 `vnpy-domestic-飞书控制机器人.md`（应用创建/部署/长连接 vs Webhook 原理）
 - **持仓批次 FIFO**：`position_lots.py` 提供 `settle_close`，按交易所规则平仓——DCE/CZCE/GFEX 先开先平、CFFEX 先平今、SHFE/INE 平今平昨
-- **Linux 部署文档**：新增 `vnpy-domestic-Linux部署.md`（systemd + CTP 凭证环境变量注入）
+- **锁仓优化（换月判断）**：`_has_position` 判断实际持仓，`pos=0` 且锁仓多空都为 0 才换月，锁仓对冲不误判空仓
 - **逐日盯市核算**：RolloverCtaEngine 集成 `settle_close` 持仓批次，历史仓按昨结算、当日仓按开仓价
+- **盈亏按交易日统计**：累计盈亏每日收盘归零，次日从 0 起算当日盈亏（隔夜持仓已逐日结算，不影响）
+- **玉米刷盘口策略**：`CornScalperStrategy`（`corn_scalper.py`），MA 判向 + 盘口深度过滤 + 被套锁仓（详见 `corn_scalper.md`）
 - **订单通知**：平仓单挂出推飞书；NOTTRADED 引擎层去重推送；被拒/失效推送
 - **延迟计算**：所有订单统一统计延迟（含挂单排队时间）；取消自动暂停开仓；修复时区减法崩溃
 - **账户报告**：新增活跃挂单列表（合约、方向、价格、成交量、状态）
 - **空 JSON 修复**：`run_cta.py` 启动前自动修复 vnpy 空数据文件崩溃
+- **Linux 部署文档**：新增 `vnpy-domestic-Linux部署.md`（systemd + CTP 凭证环境变量注入）
 
 ---
 
