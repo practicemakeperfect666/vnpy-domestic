@@ -2,7 +2,7 @@
   <br>
   <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python" alt="Python">
   <img src="https://img.shields.io/badge/vnpy-4.4.0-blue?style=flat-square" alt="vnpy">
-  <img src="https://img.shields.io/badge/version-0.1.0-brightgreen?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.2.0-brightgreen?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="License">
   <br><br>
 
@@ -11,6 +11,19 @@
   <span style="font-weight:300; font-size:1rem">基于 <a href="https://github.com/vnpy/vnpy">vnpy</a> 构建 · 专为国内期货实盘打磨</span></p>
   <br>
 </div>
+
+---
+
+## v0.2.0 更新（2026-08-07）
+
+- **MultiLayerStrategy V3**：双向逐层网格策略（RSI 超卖做多、超买做空），每层独立止盈止损，上层必须先止损才开下层
+- **平仓单追踪**：发平仓单后异步等待成交确认（`on_trade` 重置状态），避免误判已平仓
+- **平仓快速成交**：卖单 -3 跳、买单 +3 跳，用当前 bar close 发单不等收盘
+- **订单通知**：平仓单挂出推飞书；NOTTRADED 引擎层去重推送；被拒/失效推送
+- **延迟计算**：所有订单统一统计延迟（含挂单排队时间）；取消自动暂停开仓；修复时区减法崩溃
+- **账户报告**：新增活跃挂单列表（合约、方向、价格、成交量、状态）
+- **状态持久化**：`layer_state` 属性保存开仓层级/价格/方向，重启恢复
+- **空 JSON 修复**：`run_cta.py` 启动前自动修复 vnpy 空数据文件崩溃
 
 ---
 
@@ -29,15 +42,17 @@ vnpy-domestic 是一个面向国内期货实盘的 vnpy 扩展工具包。它不
 | 实盘无人值守，出问题不知道 | 钉钉/飞书推送 + 策略汇总（`monitor_interval` 可调）|
 | 非交易时段空跑浪费资源 | 守护进程按交易时段自动启停 |
 
-**五个模块：**
+**五个模块 + 策略：**
 
 | 模块 | 文件 | 职责 |
 |:----|:-----|:-----|
-| `RolloverCtaEngine` | `RolloverCtaEngine.py` | 自动换月 + 通知推送 + P&L 追踪 + CTP 断连监控 |
+| `RolloverCtaEngine` | `RolloverCtaEngine.py` | 自动换月 + 通知推送 + P&L 追踪 + CTP 断连监控 + 订单状态通知 |
 | `MyBarGenerator` | `newbargenerator.py` | 增强 K 线合成 + 品种级交易时段管理 |
-| `NotificationManager` | `notification_manager.py` | 钉钉/飞书统一通知 |
+| `NotificationManager` | `notification_manager.py` | 钉钉/飞书统一通知 + 账户报告（含挂单列表） |
 | `AKShare Datafeed` | `vnpy_akshare.py` | 免费 1 分钟 K 线数据源 |
 | `TradingTime Updater` | `update_trading_times.py` | 交易时段拉取与 CSV 持久化 |
+| `MultiLayerStrategy` | `strategies/multi_layer.py` | 双向逐层网格策略（详见 `multi_layer.md`） |
+| `CornScalperStrategy` | `strategies/corn_scalper.py` | 玉米刷盘口策略（MA 判向 + 盘口深度过滤 + 被套锁仓） |
 
 ---
 
@@ -169,12 +184,41 @@ notify_type: "both"                     # dingtalk | feishu | both
 dingtalk_webhook: "https://oapi.dingtalk.com/robot/send?access_token=你的token"
 dingtalk_secret: "你的签名密钥"
 
-feishu_webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/你的hook"
+feishu_webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/你的hook"   # 通知用（群机器人 webhook）
+
+# ── 飞书控制（可选，群里 @机器人 停止/重启策略）──
+feishu_app_id: "cli_xxx"             # 自建应用 App ID
+feishu_app_secret: "xxx"             # App Secret
+feishu_encrypt_key: ""               # 事件与回调 → Encrypt Key（没开加密留空）
+feishu_verification_token: "xxx"     # 事件与回调 → Verification Token（验签必填）
+feishu_bot_open_id: "ou_xxx"         # 机器人 open_id（@识别）
+feishu_host: "127.0.0.1"             # 监听地址，Linux 服务器改 0.0.0.0
 ```
 
 - `notify_type`：`dingtalk`（仅钉钉）、`feishu`（仅飞书）、`both`（同时推送）
 - 钉钉使用 HMAC-SHA256 签名认证，需配置 `webhook` 和 `secret`
 - 飞书使用简单的 Webhook URL
+
+`feishu_webhook` 是通知用的【群机器人 webhook】，`feishu_app_*` 是控制用的【自建应用】——两套独立、互不影响。
+
+**飞书控制（可选）**：群里 @机器人 发「停止」/「重启」，控制实盘子进程启停。飞书控制跑在**父进程**（常驻，非交易时段也能 @机器人），「停止」杀子进程、「重启」重新 spawn 子进程（全新 CTP 连接 + 全新策略初始化）。不配置 `feishu_app_id` 则不启用，通知功能不受影响。HTTP 回调模式下飞书服务器回调 `/webhook/feishu`，run_cta 内置 uvicorn 监听 3000 端口：
+
+- 本地 Windows：`npx localtunnel --port 3000` 内网穿透，后台回调地址填 `公网URL/webhook/feishu`
+- Linux 服务器：`feishu_host` 改 `0.0.0.0` + `ufw allow 3000`，回调地址填 `http://公网IP:3000/webhook/feishu`
+
+**@机器人 指令**（群里 @机器人 发送）：
+
+| 指令 | 动作 | 机器人回复 |
+|------|------|-----------|
+| `@机器人 停止` | 停止子进程（父进程 terminate 子进程，`manual_stop` 阻止自动重启）| 先回「收到停止指令，执行中...」，完成后回「停止已完成」|
+| `@机器人 重启` | 重启整个子进程（杀旧子进程 → 重新 spawn，全新 CTP 连接 + 策略初始化）| 先回「收到重启指令，执行中...」，完成后回「重启已完成」|
+| 其他消息 | 不执行 | 「收到信息」|
+
+只响应 @机器人 的文本消息，忽略 3 秒前旧消息。
+
+飞书后台「事件与回调」→「加密策略」区域，两个字段挨在一起：
+- `Encrypt Key`（加密密钥）→ 填 `feishu_encrypt_key`，没开加密可留空
+- `Verification Token`（验证令牌）→ 填 `feishu_verification_token`，必填，否则回调验签失败、challenge 不返回
 
 配置加载优先级：**显式传入参数 > `secrets.yaml` > 类内部默认值**。YAML 搜索路径：当前目录 `.vntrader/` → 包目录 `.vntrader/` → 用户家目录 `.vntrader/`。
 
@@ -201,6 +245,15 @@ feishu_webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/你的hook"
 | `setting` | 策略参数，需与策略类的 `parameters` 列表对应 |
 
 支持的交易所后缀：`SHFE`（上期所）、`DCE`（大商所）、`CZCE`（郑商所）、`INE`（能源中心）、`CFFEX`（中金所）。
+
+> **⚠ CZCE（郑商所）合约年份注意事项：** CZCE 合约代码年份仅用 1 位数字
+> （如 `MA610` = 2026 年 10 月），其他交易所用 2 位（如 `rb2610`）。
+> 本项目的换月引擎和数据源已做自动转换：
+> 
+> - **换月方向**（Sina → CTP）：去小写 + 去首位数 → `MA2610` → `MA610.CZCE`
+> - **数据加载方向**（CTP → akshare）：补 "2" → `MA610` → `MA2610` 查询 Sina
+> 
+> 编写策略配置时直接用 CTP 格式（1 位年）即可，如 `MA610.CZCE`。
 
 ### vt_setting.json（数据源配置）
 
@@ -255,10 +308,19 @@ python run_cta.py
 
 继承 `CtaEngine`，叠加自动换月、成交通知、P&L 追踪和 CTP 断连监控。
 
-使用新浪财经 API 按持仓量匹配主力——请求 `nf_XXX0` 连续合约和 24 个月合约，持仓量一致的即为主力。换月执行前先 `get_contract` 验证新合约存在，不存在则跳过不动状态。换月检查分三个时机：初始化时静默记录（`_check_rollover_for_init`）、初始化后汇总推送（`send_rollover_init_summary`）、平仓 pos=0 时即时检查（`_check_and_notify_rollover`）。
+**换月逻辑：** 使用新浪财经 API 按持仓量匹配主力——请求 `nf_XXX0` 连续合约和 24 个月合约，持仓量一致的即为主力。换月执行前先 `get_contract` 验证新合约存在，不存在则跳过不动状态。换月检查分三个时机：初始化时静默记录（`_check_rollover_for_init`）、初始化后汇总推送（`send_rollover_init_summary`）、平仓 pos=0 时即时检查（`_check_and_notify_rollover`）。
 
-通知设计：REJECTED 状态才推手机，开平仓按 position flip（flat↔持仓）语义推送，含本次盈亏与累计盈亏。成交延迟 > 2s 自动暂停开仓。定时器每秒检测 CTP 断连（`last_activity_time` > 120s 告警），按 `monitor_interval` 间隔汇总策略状态。`write_log` 含"失败"或"错误"自动推手机。
+**订单通知（v0.2.0）：**
 
+| 订单状态 | 通知 |
+|:---|:---|
+| REJECTED | ❌ 订单被拒 |
+| NOTTRADED（开仓单/平仓单） | ⚠️ 开仓单未成交 / ⚠️ 平仓单未成交（去重，首次推送） |
+| 平仓单挂出（策略层） | 📤 平仓单已挂出 @价格 |
+| 未成交追价（策略层） | ⚠️ 平仓单追价 @新价格 |
+| 成交 | 🟢 开仓 / 🔴 平仓 |
+
+**延迟计算：** 所有订单统一统计延迟 = `trade.datetime - 发单时间`（含挂单排队等待时间）。
 
 ### MyBarGenerator
 
@@ -268,15 +330,29 @@ python run_cta.py
 
 ### NotificationManager
 
-钉钉（HMAC-SHA256）和飞书（Webhook）统一通知。配置优先级：显式传入 > `secrets.yaml` > 类默认值，YAML 按当前目录、包目录、用户家目录依次搜索。速率限制当前关闭（设 `_min_send_interval` 可启用）。提供启动/关闭通知、系统硬件信息（CPU/内存/磁盘/运行时间）、账户报告（动态权益/可用资金/持仓）、策略状态分批汇总等预置方法。
+钉钉（HMAC-SHA256）和飞书（Webhook）统一通知。配置优先级：显式传入 > `secrets.yaml` > 类默认值，YAML 按当前目录、包目录、用户家目录依次搜索。速率限制当前关闭（设 `_min_send_interval` 可启用）。提供启动/关闭通知、系统硬件信息（CPU/内存/磁盘/运行时间）、账户报告（动态权益/可用资金/持仓/活跃挂单列表）、策略状态分批汇总等预置方法。
+
+**账户报告 v0.2.0：** 新增活跃挂单列表（合约、方向、价格、已成交/总数量、状态），由 `main_engine.get_all_active_orders()` 实时查询。
+
+**每日订单状态统计：** 账户报告自动附带当日订单状态汇总（提交中/未成交/部分成交/全部成交/已撤销/被拒），按自然日自动清零。数据由 `RolloverCtaEngine` 在 `process_order_event` 中实时统计，`get_daily_order_stats()` 供 `run_cta.py` 调用后传入 `send_account_report`。
 
 ### AKShare 数据源
 
-通过 `sys.modules` 别名注册为 vnpy 原生数据源。调用 `akshare.futures_zh_minute_sina()` 获取 1 分钟 K 线，仅支持 `Interval.MINUTE`，其他周期返回空列表。
+通过 `sys.modules` 别名注册为 vnpy 原生数据源。调用 `akshare.futures_zh_minute_sina()` 获取 1 分钟 K 线，仅支持 `Interval.MINUTE`，其他周期返回空列表。CZCE 合约自动补 "2" 年份前缀（`MA610` → `MA2610`）。
 
 ### 交易时段更新
 
 `run_cta.py` 启动时调用 `run_and_save()`，读取 `cta_strategy_setting.json` 提取品种，从 `dict.openctp.cn/times` 拉取交易时间，按 18–6 点分离夜盘，保存为 `trading_times.csv`。API 失败不阻塞启动。
+
+### MultiLayerStrategy
+
+双向逐层网格策略。详见 `strategies/multi_layer.md`。
+
+核心逻辑：RSI 超卖（< `rsi_entry`）做多逐层补仓，RSI 超买（> `rsi_exit`）做空逐层补仓。每层独立止盈止损，上层必须先止损才开下层。出场条件：RSI 反向 + MA20 穿越 + 急变保护。平仓单逾期自动追价（±3 跳，每单仅追一次），成交确认异步重置状态。
+
+### CornScalperStrategy
+
+玉米刷盘口策略。核心：买一开多 → 卖一平、卖一开空 → 买一平，赚买卖价差。被套后开反向锁仓单对冲敞口，继续刷反向价差，直到盘口回到成本价才挂平仓单解套（随缘）。多空分别记录 `long_pos`/`short_pos`（锁仓净持仓=0 不误判空仓）。开仓单盘口变薄（< `min_depth`）撤单等厚重挂，平仓单价格反向 `deviation_ticks` 跳撤单追价。收盘前 3 分钟撤单强平。
 
 ---
 
@@ -303,6 +379,7 @@ run_child()
 ```
 vnpy-domestic/
 ├── run_cta.py                          ← 实盘入口（守护进程）
+├── README.md                           ← 本文件
 ├── pyproject.toml                      ← 包配置
 ├── .gitignore                          ← 保护 .vntrader/
 │
@@ -318,14 +395,19 @@ vnpy-domestic/
 │   ├── trader/
 │   │   ├── newbargenerator.py          ← MyBarGenerator + 交易时段模块
 │   │   ├── notification_manager.py     ← 钉钉/飞书通知
+│   │   ├── feishu_http_control.py      ← 飞书控制（@机器人 停止/重启）
+│   │   ├── position_lots.py            ← 持仓批次 + 平仓规则（FIFO/平今平昨）
 │   │   ├── update_trading_times.py     ← 交易时段拉取
 │   │   └── vnpy_akshare.py             ← AKShare 数据源
 │   └── RolloverCtaEngine/
 │       └── RolloverCtaEngine.py        ← 自动换月 + 通知 + P&L + 断连监控
 │
 └── strategies/
-    ├── save_bar.py                     ← 示例策略（K 线落盘）
-    └── dual_ma.py                      ← 双均线策略
+    ├── multi_layer.py                  ← 双向逐层网格策略（V3）
+    ├── multi_layer.md                  ← 策略详细文档
+    ├── corn_scalper.py                 ← 玉米刷盘口策略
+    ├── dual_ma.py                      ← 双均线策略
+    └── save_bar.py                     ← K 线落盘
 ```
 
 ---
@@ -348,4 +430,3 @@ furnished to do so, subject to the following conditions:
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
 ```
-

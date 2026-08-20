@@ -12,6 +12,7 @@ from vnpy_ctastrategy import (
     TradeData,
     OrderData,
 )
+from vnpy.trader.utility import get_file_path
 from vnpy_domestic import MyBarGenerator
 
 
@@ -40,9 +41,15 @@ class SaveStrategy(CtaTemplate):
 
     def init_csv_file(self):
         try:
-            save_dir = Path(self.save_path)
-            if not save_dir.is_absolute():
-                save_dir = Path.cwd() / save_dir
+            sp = Path(self.save_path)
+            if sp.is_absolute():
+                save_dir = sp
+            else:
+                # 相对路径统一走 vnpy TEMP_DIR（.vntrader），避免 cwd 变化导致路径分叉
+                parts = list(sp.parts)
+                if parts and parts[0] == ".vntrader":
+                    sp = Path(*parts[1:])
+                save_dir = get_file_path(str(sp))
             save_dir.mkdir(parents=True, exist_ok=True)
             symbol_name = self.vt_symbol.replace(".", "_")
             date_str = datetime.now().strftime("%Y%m%d")

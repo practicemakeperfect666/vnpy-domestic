@@ -1,6 +1,6 @@
 """vnpy-domestic: 面向国内期货的 vnpy 增强扩展包"""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import sys
 

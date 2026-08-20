@@ -1,15 +1,17 @@
 import os
 import multiprocessing
 import sys
+import queue
+import threading
 from time import sleep
 import time as time_mod
 from datetime import datetime, time as dtime
-from pathlib import Path
 
 from vnpy.event import EventEngine
 from vnpy.trader.setting import SETTINGS
 from vnpy.trader.engine import MainEngine
 from vnpy.trader.logger import INFO, logger
+from vnpy.trader.utility import get_file_path
 
 from vnpy_ctp import CtpGateway
 from vnpy_ctastrategy.base import EVENT_CTA_LOG
@@ -17,6 +19,7 @@ from vnpy_ctastrategy.base import EVENT_CTA_LOG
 from vnpy_domestic.RolloverCtaEngine.RolloverCtaEngine import RolloverCtaEngine
 from vnpy_domestic.trader.notification_manager import NotificationManager
 from vnpy_domestic.trader.update_trading_times import run_and_save
+from vnpy_domestic.trader.feishu_http_control import load_feishu_control, build_control_app, start_control, reply_text
 
 
 SETTINGS["log.active"] = True
@@ -71,15 +74,15 @@ def load_ctp_setting() -> dict:
         "用户名": username,
         "密码": password,
         "经纪商代码": "9999",
-        "交易服务器": "182.254.243.31:30001",
-        "行情服务器": "182.254.243.31:30011",
+        "交易服务器": "182.254.243.31:30003",
+        "行情服务器": "182.254.243.31:30013",
         "产品名称": "simnow_client_test",
         "授权编码": "0000000000000000",
         "产品信息": ""
     }
 
 
-def run_child() -> None:
+def run_child(child_conn=None) -> None:
     """子进程：运行 vnpy 全栈"""
     SETTINGS["log.file"] = True
 
@@ -108,6 +111,12 @@ def run_child() -> None:
     logger.info("等待CTP连接和数据加载...")
     sleep(40)
 
+    # 修复 vnpy 空 JSON 文件导致崩溃的 bug
+    p = get_file_path("cta_strategy_data.json")
+    if p.exists() and p.stat().st_size == 0:
+        p.write_text("{}")
+        logger.info("已修复空 JSON 文件: cta_strategy_data.json")
+
     cta_engine.init_engine()
     logger.info("CTA引擎初始化完成（策略已自动加载）")
 
@@ -125,13 +134,20 @@ def run_child() -> None:
     try:
         # 启动后发一次账户报告（含系统状态）
         sleep(5)
-        notify.send_account_report(main_engine)
+        notify.send_account_report(main_engine, order_stats=cta_engine.get_daily_order_stats())
 
         last_report_time = time_mod.time()
         REPORT_INTERVAL = 420  # 7分钟
 
         while True:
-            sleep(10)
+            sleep(1)
+
+            # 检查父进程停止指令（正常退出：撤挂单 + 写持仓）
+            if child_conn is not None and child_conn.poll():
+                msg = child_conn.recv()
+                if msg == "stop":
+                    logger.info("收到父进程停止指令，正常退出")
+                    break
 
             trading = check_trading_period()
             if not trading:
@@ -139,7 +155,7 @@ def run_child() -> None:
                 break
 
             if time_mod.time() - last_report_time >= REPORT_INTERVAL:
-                notify.send_account_report(main_engine)
+                notify.send_account_report(main_engine, order_stats=cta_engine.get_daily_order_stats())
                 last_report_time = time_mod.time()
 
     except KeyboardInterrupt:
@@ -177,21 +193,86 @@ def run_parent() -> None:
     run_and_save()
     print("=" * 60)
 
+    # ── 飞书控制（放父进程，常驻，非交易时段也能用）──
+    ctrl_queue = queue.Queue()
+    feishu = load_feishu_control()
+    if feishu.get("app_id"):
+        app = build_control_app(ctrl_queue, feishu["app_id"], feishu["app_secret"],
+                                feishu["encrypt_key"], feishu["verification_token"],
+                                feishu["bot_open_id"])
+        threading.Thread(target=start_control,
+                         args=(app, feishu["host"], 3000), daemon=True).start()
+        print(f"飞书 HTTP 控制已启动（父进程），监听 {feishu['host']}:3000", flush=True)
+        if feishu.get("public_url"):
+            print(f"飞书后台「请求地址」填: {feishu['public_url']}/webhook/feishu", flush=True)
+
     child_process = None
+    parent_conn = None
     restart_count = 0
     max_restart = 5
+    manual_stop = False  # stop 指令后阻止自动重启
+    child_start_time = 0.0  # 子进程启动时间戳（稳定运行过则重置崩溃计数）
 
     while True:
         try:
             trading = check_trading_period()
 
-            if trading and child_process is None:
+            # ── 处理飞书控制指令 ──
+            if feishu.get("app_id"):
+                try:
+                    cmd = ctrl_queue.get_nowait()
+                except queue.Empty:
+                    cmd = None
+                if cmd is not None:
+                    action, msg_id = cmd
+                    if action == "stop":
+                        manual_stop = True
+                        if child_process is not None and child_process.is_alive():
+                            print("🛑 飞书指令：停止子进程（正常退出，撤挂单+写持仓）", flush=True)
+                            if parent_conn is not None:
+                                parent_conn.send("stop")
+                            child_process.join(timeout=30)
+                            if child_process.is_alive():
+                                print("⚠️ 子进程未在30秒内退出，强制终止", flush=True)
+                                child_process.terminate()
+                                child_process.join(timeout=5)
+                                if child_process.is_alive():
+                                    child_process.kill()
+                            child_process = None
+                        reply_text(feishu.get("app_id"), feishu.get("app_secret"),
+                                   msg_id, "停止已完成")
+                    elif action == "restart":
+                        manual_stop = False
+                        if child_process is not None and child_process.is_alive():
+                            print("🔄 飞书指令：重启子进程（正常退出旧子进程）", flush=True)
+                            if parent_conn is not None:
+                                parent_conn.send("stop")
+                            child_process.join(timeout=30)
+                            if child_process.is_alive():
+                                child_process.terminate()
+                                child_process.join(timeout=5)
+                                if child_process.is_alive():
+                                    child_process.kill()
+                            child_process = None
+                        if trading:
+                            parent_conn, child_conn = multiprocessing.Pipe()
+                            child_process = multiprocessing.Process(target=run_child, args=(child_conn,))
+                            child_process.start()
+                            child_start_time = time_mod.time()
+                            reply_text(feishu.get("app_id"), feishu.get("app_secret"),
+                                       msg_id, f"重启已完成 (PID {child_process.pid})")
+                        else:
+                            reply_text(feishu.get("app_id"), feishu.get("app_secret"),
+                                       msg_id, "重启已完成（非交易时段，子进程未启动）")
+
+            if trading and child_process is None and not manual_stop:
                 print(f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 print("🔄 交易时段开始，启动子进程...")
-                child_process = multiprocessing.Process(target=run_child)
+                parent_conn, child_conn = multiprocessing.Pipe()
+                child_process = multiprocessing.Process(target=run_child, args=(child_conn,))
                 child_process.start()
                 print(f"✅ 子进程启动成功 (PID: {child_process.pid})")
-                restart_count = 0
+                child_start_time = time_mod.time()
 
             if not trading and child_process is not None:
                 if not child_process.is_alive():
@@ -210,18 +291,22 @@ def run_parent() -> None:
                 print("⚠️ 子进程意外退出")
                 child_process = None
 
-                if trading:
+                if manual_stop:
+                    pass  # 手动停止，不自动重启
+                elif trading:
+                    # 稳定运行过一段时间才重置崩溃计数，否则连续崩溃累加触发熔断
+                    if time_mod.time() - child_start_time > 180:
+                        restart_count = 0
                     restart_count += 1
                     if restart_count < max_restart:
                         print(f"🔄 尝试重启子进程 ({restart_count}/{max_restart})...")
                         sleep(3)
-                        continue
                     else:
                         print(f"❌ 重启次数过多 ({max_restart})，暂停重启")
                         sleep(60)
                         restart_count = 0
 
-            sleep(5)
+            sleep(1)
 
         except KeyboardInterrupt:
             print("\n⚠️ 收到中断信号，正在退出...")

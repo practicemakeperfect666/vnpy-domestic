@@ -12,6 +12,8 @@ import requests
 import psutil
 import yaml
 
+from vnpy.trader.constant import Direction, Status
+
 
 class NotificationManager:
     """
@@ -80,10 +82,6 @@ class NotificationManager:
         self.feishu_webhook = feishu_webhook or secrets.get("feishu_webhook", "") or self.FEISHU_WEBHOOK
         
         self.log_callback = None
-
-        # 速率限制（当前已关闭）
-        self._last_send_time: float = 0.0
-        self._min_send_interval: float = 0.0
 
     def set_log_callback(self, callback):
         """设置日志回调函数"""
@@ -176,13 +174,6 @@ class NotificationManager:
         -------
         bool : 是否发送成功
         """
-        # ── 速率限制 ──
-        now = time.time()
-        if now - self._last_send_time < self._min_send_interval:
-            self._log(f"速率限制跳过：距上次发送仅 {now - self._last_send_time:.1f}s")
-            return False
-        self._last_send_time = now
-
         notify_type = force_type or self.notify_type
         
         if notify_type == "dingtalk":
@@ -247,7 +238,7 @@ class NotificationManager:
 
         return "\n".join(lines)
 
-    def send_account_report(self, main_engine) -> None:
+    def send_account_report(self, main_engine, order_stats: dict = None) -> None:
         """发送账户资金 + 持仓 + 系统状态报告"""
         try:
             accounts = main_engine.get_all_accounts()
@@ -261,6 +252,19 @@ class NotificationManager:
             positions = main_engine.get_all_positions()
             pos_text = self.format_position_text(positions)
 
+            # ── 订单状态统计 ──
+            order_lines = ""
+            if order_stats:
+                STATUS_KEYS = ["提交中", "未成交", "部分成交", "全部成交", "已撤销", "拒单"]
+                parts = []
+                for label in STATUS_KEYS:
+                    cnt = order_stats.get(label, 0)
+                    if cnt:
+                        parts.append(f"{label}:{cnt}")
+                if parts:
+                    total = order_stats.get("总计", 0)
+                    order_lines = f"  当日订单: {'  '.join(parts)}  |  共{total}笔\n"
+
             try:
                 cpu = f"{psutil.cpu_percent(interval=1)}%"
                 mem = f"{psutil.virtual_memory().percent}%"
@@ -270,6 +274,27 @@ class NotificationManager:
             except Exception:
                 cpu = mem = disk = uptime = "N/A"
 
+            # ── 挂单信息 ──
+            active_orders = main_engine.get_all_active_orders()
+            pending_lines = ""
+            if active_orders:
+                DIR_MAP = {Direction.LONG: "多", Direction.SHORT: "空"}
+                STATUS_MAP = {
+                    Status.SUBMITTING: "提交中", Status.NOTTRADED: "未成交",
+                    Status.PARTTRADED: "部成",
+                }
+                lines = []
+                for o in active_orders:
+                    strat_name = o.reference.replace("CtaStrategy_", "") if o.reference else ""
+                    dir_label = DIR_MAP.get(o.direction, "?")
+                    status_label = STATUS_MAP.get(o.status, str(o.status))
+                    status_code = o.status.name   # SUBMITTING / NOTTRADED / PARTTRADED
+                    lines.append(
+                        f"    {strat_name} {o.symbol} {dir_label} @{o.price} "
+                        f"{o.traded}/{o.volume}手 {status_label}({status_code})"
+                    )
+                pending_lines = "  挂单:\n" + "\n".join(lines) + "\n\n"
+
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             sep = "─" * 40
             text = (
@@ -277,7 +302,8 @@ class NotificationManager:
                 f"{sep}\n"
                 f"  动态权益: {balance:>12.2f}\n"
                 f"  可用资金: {available:>12.2f}\n"
-                f"\n"
+                f"{order_lines}"
+                f"{pending_lines}"
                 f"  持仓:\n{pos_text}\n"
                 f"\n"
                 f"  运行: {uptime}  |  CPU: {cpu}\n"

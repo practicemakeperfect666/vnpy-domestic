@@ -1,37 +1,32 @@
 {
-    "DualMa_rb": {
-        "class_name": "DualMaStrategy",
-        "vt_symbol": "rb2610.SHFE",
+    "MultiLayer_b": {
+        "class_name": "MultiLayerStrategy",
+        "vt_symbol": "b2611.DCE",
         "setting": {
-            "fast_period": 10,
-            "slow_period": 30,
-            "fixed_size": 1
+            "layers": 3,
+            "stoploss": 0.02,
+            "drop_threshold": 0.03,
+            "drop_lookback": 5,
+            "size_1": 1,
+            "size_2": 2,
+            "size_3": 3,
+            "down_2": 0.003,
+            "down_3": 0.005,
+            "tp_pct": 0.02,
+            "rsi_period": 14,
+            "rsi_entry": 40,
+            "rsi_exit": 60,
+            "entry_cmp": "less",
+            "exit_cmp": "none"
         }
     },
-    "DualMa_p": {
-        "class_name": "DualMaStrategy",
-        "vt_symbol": "p2609.DCE",
+    "CornScalper_c": {
+        "class_name": "CornScalperStrategy",
+        "vt_symbol": "c2611.DCE",
         "setting": {
-            "fast_period": 10,
-            "slow_period": 30,
+            "ma_window": 5,
+            "min_depth": 500,
             "fixed_size": 1
-        }
-    },
-    "DualMa_ag": {
-        "class_name": "DualMaStrategy",
-        "vt_symbol": "ag2608.SHFE",
-        "setting": {
-            "fast_period": 10,
-            "slow_period": 30,
-            "fixed_size": 1
-        }
-    },
-    "SaveStrategy_i": {
-        "class_name": "SaveStrategy",
-        "vt_symbol": "i2609.DCE",
-        "setting": {
-            "save_path": ".vntrader/bar_data",
-            "cache_size": 100
         }
     }
 }

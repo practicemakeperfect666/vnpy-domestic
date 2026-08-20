@@ -10,6 +10,7 @@ import pandas as pd
 import akshare as ak
 
 from vnpy.trader.object import HistoryRequest, BarData, Interval
+from vnpy.trader.constant import Exchange
 from vnpy.trader.datafeed import BaseDatafeed
 
 
@@ -43,6 +44,11 @@ class Datafeed(BaseDatafeed):
         if req.interval != Interval.MINUTE:
             output(f"本数据服务仅支持1分钟K线，当前请求周期: {req.interval}")
             return []
+
+        # CZCE: 1-digit year → 2-digit for Sina (MA610 → MA2610)
+        if req.exchange == Exchange.CZCE:
+            variety = ''.join(c for c in symbol if not c.isdigit())
+            symbol = variety + "2" + symbol[len(variety):]
 
         # 调用 akshare 获取1分钟数据
         try:
