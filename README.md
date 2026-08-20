@@ -53,6 +53,7 @@ vnpy-domestic 是一个面向国内期货实盘的 vnpy 扩展工具包。它不
 | `TradingTime Updater` | `update_trading_times.py` | 交易时段拉取与 CSV 持久化 |
 | `FeishuControl` | `feishu_http_control.py` | 飞书 HTTP 回调控制（@机器人 停止/重启） |
 | `PositionLots` | `position_lots.py` | 持仓批次 FIFO + 平今平昨规则 |
+| `CornScalperStrategy` | `strategies/corn_scalper.py` | 玉米刷盘口策略（MA 判向 + 盘口深度过滤 + 被套锁仓） |
 
 ---
 
@@ -358,6 +359,10 @@ Linux 服务器部署（systemd 守护 + CTP 凭证环境变量注入）见 `vnp
 
 `settle_close(lots, exchange, offset, qty)` 按交易所规则平仓：DCE/CZCE/GFEX 先开先平、CFFEX 先平今、SHFE/INE 平今平昨（涨停先平昨）。`trading_day(dt)` 提供交易日判定。逐日盯市核算中，历史仓按昨结算、当日仓按开仓价。
 
+### CornScalperStrategy
+
+玉米刷盘口策略。MA 判方向，盘口一买一卖赚价差；被套开反向锁仓，等盘口回成本价解套。多空分记 `long_pos`/`short_pos`（锁仓净持仓 0 不误判无仓）。详见 `strategies/corn_scalper.md`。
+
 ---
 
 ## 守护进程
@@ -409,6 +414,8 @@ vnpy-domestic/
 │       └── RolloverCtaEngine.py        ← 自动换月 + 通知 + P&L + 断连监控
 │
 └── strategies/
+    ├── corn_scalper.py                 ← 玉米刷盘口策略
+    ├── corn_scalper.md                 ← 策略详细文档
     ├── dual_ma.py                      ← 双均线策略
     └── save_bar.py                     ← K 线落盘
 ```
