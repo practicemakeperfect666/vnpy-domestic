@@ -2,7 +2,7 @@
   <br>
   <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python" alt="Python">
   <img src="https://img.shields.io/badge/vnpy-4.4.0-blue?style=flat-square" alt="vnpy">
-  <img src="https://img.shields.io/badge/version-0.2.0-brightgreen?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.3.0-brightgreen?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="License">
   <br><br>
 
@@ -11,6 +11,17 @@
   <span style="font-weight:300; font-size:1rem">基于 <a href="https://github.com/vnpy/vnpy">vnpy</a> 构建 · 专为国内期货实盘打磨</span></p>
   <br>
 </div>
+
+---
+
+## v0.3.0 更新（2026-08-20）
+
+- **飞书 HTTP 回调控制**：群里 @机器人 停止/重启实盘策略（`feishu_http_control.py`），父进程常驻、验签 + `message_id` 去重、reply 直连绕过代理
+- **持仓批次 FIFO**：`position_lots.py` 提供 `settle_close`，按交易所规则平仓——DCE/CZCE/GFEX 先开先平、CFFEX 先平今、SHFE/INE 平今平昨
+- **玉米刷盘口策略**：`CornScalperStrategy`（`corn_scalper.py`），MA 判向 + 盘口深度过滤 + 被套反向锁仓
+- **MultiLayer 策略文档**：新增 `strategies/multi_layer.md`
+- **Linux 部署文档**：新增 `vnpy-domestic-Linux部署.md`（systemd + CTP 凭证环境变量注入）
+- **逐日盯市核算**：RolloverCtaEngine 集成 `settle_close` 持仓批次，历史仓按昨结算、当日仓按开仓价
 
 ---
 
@@ -42,7 +53,7 @@ vnpy-domestic 是一个面向国内期货实盘的 vnpy 扩展工具包。它不
 | 实盘无人值守，出问题不知道 | 钉钉/飞书推送 + 策略汇总（`monitor_interval` 可调）|
 | 非交易时段空跑浪费资源 | 守护进程按交易时段自动启停 |
 
-**五个模块 + 策略：**
+**核心模块 + 策略：**
 
 | 模块 | 文件 | 职责 |
 |:----|:-----|:-----|
@@ -51,6 +62,8 @@ vnpy-domestic 是一个面向国内期货实盘的 vnpy 扩展工具包。它不
 | `NotificationManager` | `notification_manager.py` | 钉钉/飞书统一通知 + 账户报告（含挂单列表） |
 | `AKShare Datafeed` | `vnpy_akshare.py` | 免费 1 分钟 K 线数据源 |
 | `TradingTime Updater` | `update_trading_times.py` | 交易时段拉取与 CSV 持久化 |
+| `FeishuControl` | `feishu_http_control.py` | 飞书 HTTP 回调控制（@机器人 停止/重启） |
+| `PositionLots` | `position_lots.py` | 持仓批次 FIFO + 平今平昨规则 |
 | `MultiLayerStrategy` | `strategies/multi_layer.py` | 双向逐层网格策略（详见 `multi_layer.md`） |
 | `CornScalperStrategy` | `strategies/corn_scalper.py` | 玉米刷盘口策略（MA 判向 + 盘口深度过滤 + 被套锁仓） |
 
@@ -343,6 +356,14 @@ python run_cta.py
 ### 交易时段更新
 
 `run_cta.py` 启动时调用 `run_and_save()`，读取 `cta_strategy_setting.json` 提取品种，从 `dict.openctp.cn/times` 拉取交易时间，按 18–6 点分离夜盘，保存为 `trading_times.csv`。API 失败不阻塞启动。
+
+### FeishuControl（飞书控制）
+
+可选功能，配置 `feishu_app_id` 后启用。HTTP 回调模式下群里 @机器人 发送「停止」/「重启」控制实盘子进程启停，跑在父进程（常驻，非交易时段也能 @机器人）。`run_cta.py` 内置 uvicorn 监听 3000 端口，回调地址 `/webhook/feishu`。验签用 `verification_token`（必填），`message_id` 去重防重复触发，reply 直连 `open.feishu.cn`（绕过 Clash 代理）。详见上文「配置 → secrets.yaml → 飞书控制」。
+
+### PositionLots（持仓批次）
+
+`settle_close(lots, exchange, offset, qty)` 按交易所规则平仓：DCE/CZCE/GFEX 先开先平、CFFEX 先平今、SHFE/INE 平今平昨（涨停先平昨）。`trading_day(dt)` 提供交易日判定。逐日盯市核算中，历史仓按昨结算、当日仓按开仓价。
 
 ### MultiLayerStrategy
 
