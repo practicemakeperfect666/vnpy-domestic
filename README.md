@@ -346,7 +346,7 @@ python run_cta.py
 
 ### FeishuControl（飞书控制）
 
-可选功能，配置 `feishu_app_id` 后启用。HTTP 回调模式下群里 @机器人 发送「停止」/「重启」控制实盘子进程启停，跑在父进程（常驻，非交易时段也能 @机器人）。`run_cta.py` 内置 uvicorn 监听 3000 端口，回调地址 `/webhook/feishu`。验签用 `verification_token`（必填），`message_id` 去重防重复触发，reply 直连 `open.feishu.cn`（绕过 Clash 代理）。详见上文「配置 → secrets.yaml → 飞书控制」。
+可选功能，配置 `feishu_app_id` 后启用。HTTP 回调模式下群里 @机器人 发送「停止」/「重启」控制实盘子进程启停，跑在父进程（常驻，非交易时段也能 @机器人）。`run_cta.py` 内置 uvicorn 监听 3000 端口，回调地址 `/webhook/feishu`。验签用 `verification_token`（必填），`message_id` 去重防重复触发，reply 直连 `open.feishu.cn`（绕过 Clash 代理）。详见上文「配置 → secrets.yaml → 飞书控制」；从 0 到 1 的机器人创建/部署教程见 `vnpy-domestic-飞书控制机器人.md`。
 
 ### PositionLots（持仓批次）
 
