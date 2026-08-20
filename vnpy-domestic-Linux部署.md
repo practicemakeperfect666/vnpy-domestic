@@ -150,6 +150,9 @@ journalctl -u vnpy-cta -f
 # 看最近日志
 journalctl -u vnpy-cta -n 200 --no-pager
 
+# 看当天全部日志
+journalctl -u vnpy-cta --since today
+
 # 重启（改完策略代码后）
 sudo systemctl restart vnpy-cta
 
