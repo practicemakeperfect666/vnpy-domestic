@@ -17,7 +17,7 @@ from vnpy_domestic.trader.position_lots import trading_day, settle_close
 
 
 class CornScalperStrategy(CtaTemplate):
-    author = "luning"
+    author = "vnpy-domestic"
 
     ma_window = 5
     min_depth = 500
