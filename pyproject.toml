@@ -15,6 +15,9 @@ dependencies = [
     "requests",
     "psutil",
     "pyyaml",
+    "lark-oapi",
+    "fastapi",
+    "uvicorn",
 ]
 
 [tool.setuptools.packages.find]

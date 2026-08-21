@@ -46,17 +46,49 @@ sudo apt install -y build-essential ninja-build
 pip install vnpy vnpy_ctastrategy vnpy_ctp vnpy_sqlite
 
 # 本项目依赖
-pip install pyyaml requests akshare psutil pandas
+pip install pyyaml requests akshare psutil pandas lark-oapi fastapi uvicorn
 
 # 安装本包（editable 模式，改代码不用重装）
 pip install -e .
+
+# ⚠️ 生成中文 locale：vnpy_ctp 是 C++ 扩展，运行时 CTP 库要创建 zh_CN locale，
+#    缺了会报 "locale::facet::_S_create_c_locale name not valid" 直接崩溃
+sudo apt install -y locales
+sudo locale-gen zh_CN.UTF-8 zh_CN.GBK
 ```
 
 ## 5. 配置文件
 
 ### 5.1 CTP 账号（SimNow）
 
-不存文件。凭证通过 `systemctl set-environment` 注入 systemd 内存（重启后清空，需重新输入），不落盘。
+账号从 SimNow 官网注册（https://www.simnow.com.cn），注册时选 **7×24 全天候环境**——`run_cta.py` 硬编码的服务器就是 7×24 的，不是「交易时段」环境。
+
+凭证不写进文件、不落盘。用 `systemctl set-environment` 把账号密码注入 systemd 内存（服务器重启后清空，需重输），磁盘上不存密码：
+
+```bash
+sudo systemctl set-environment CTP_USER=你的SimNow账号
+sudo systemctl set-environment CTP_PASSWORD=你的SimNow密码
+```
+
+> ⚠️ 密码含 `!`、`$`、空格、`#` 等特殊字符时，用单引号包住整个 KEY=value
+> （否则 bash 把 `!` 当历史命令，报 `event not found`）：
+> `sudo systemctl set-environment 'CTP_PASSWORD=a!abcd'`
+
+**查 / 改 / 清密码：**
+
+```bash
+# 查看已注入的凭证（密码明文显示，别截图外传）
+sudo systemctl show-environment | grep CTP
+
+# 换密码：直接重设同名变量覆盖
+sudo systemctl set-environment CTP_PASSWORD=新密码
+
+# 清空（不再跑时）
+sudo systemctl unset-environment CTP_USER CTP_PASSWORD
+```
+
+> 变量设到 systemd 管理器（PID 1），机器上所有 systemd 服务都能读到。自己的服务器
+> + SimNow 仿真盘风险可控；真要隔离可改 `EnvironmentFile=`，当前没必要。
 
 CTP 服务器地址已硬编码在 `run_cta.py` 第74-75行，用的 SimNow 7×24：
 ```
@@ -92,6 +124,9 @@ cat .vntrader/cta_strategy_setting.json
 
 ## 6. systemd 服务
 
+把下面整段**复制粘贴到服务器终端，回车执行**。它是 heredoc 命令，会自动生成
+`/etc/systemd/system/vnpy-cta.service` 这个 unit 文件（不用手动建文件、不用编辑器）。
+
 凭证不存盘。每次开机后手动 `systemctl set-environment` 输入，存 systemd 内存。
 
 ```bash
@@ -117,6 +152,11 @@ WantedBy=multi-user.target
 EOF
 ```
 
+```bash
+# 验证文件生成成功
+cat /etc/systemd/system/vnpy-cta.service
+```
+
 **unit 文件关键字段：**
 
 | 字段 | 作用 |
@@ -128,19 +168,47 @@ EOF
 | `ExecStart` | 用 conda 环境的 python 跑 run_cta.py |
 | `StandardOutput/Error=journal` | 日志进 journald，用 `journalctl -u vnpy-cta` 查看 |
 
-## 7. 启动
+## 7. 启动（完整流程）
 
 ```bash
+# ① 让 systemd 重新读取刚写的 unit 文件（每次改 unit 后都要做）
 sudo systemctl daemon-reload
-sudo systemctl enable vnpy-cta                 # 开机自启（凭证未注入时 ConditionEnvironment 会跳过启动，不会报错）
 
-# ⬇ 每次开机后手动执行这两步：
+# ② 开机自启（凭证没注入时 ConditionEnvironment 让它静默跳过，不报错）
+sudo systemctl enable vnpy-cta
+
+# ③ 注入账号密码（见 5.1 节）+ 中文 locale（vnpy_ctp C++ 层需要）
 sudo systemctl set-environment CTP_USER=你的SimNow账号
 sudo systemctl set-environment CTP_PASSWORD=你的SimNow密码
+sudo systemctl set-environment LC_ALL=zh_CN.UTF-8
+sudo systemctl set-environment LANG=zh_CN.UTF-8
+
+# ④ 启动
 sudo systemctl start vnpy-cta
 
-# 之后 restart 不需要重输（systemd 内存里还有）
+# ⑤ 验证：凭证读到了 + 服务在跑
+sudo systemctl show vnpy-cta -p Environment     # 应显示 CTP_USER=xxx CTP_PASSWORD=yyy
+sudo systemctl status vnpy-cta                  # 应显示 active (running)
+journalctl -u vnpy-cta -n 50 --no-pager         # 看有没有报错
+```
+
+**之后的操作：**
+
+```bash
+# 重启服务（改代码后）——凭证还在 systemd 内存里，不用重输
 sudo systemctl restart vnpy-cta
+
+# 换密码后重启
+sudo systemctl set-environment CTP_PASSWORD=新密码
+sudo systemctl restart vnpy-cta
+```
+
+**服务器重启后：** systemd 内存清空、凭证没了，服务被 `ConditionEnvironment` 静默跳过（status 显示 inactive，不报错）。重新执行 ③④ 两步即可：
+
+```bash
+sudo systemctl set-environment CTP_USER=你的账号
+sudo systemctl set-environment CTP_PASSWORD=你的密码
+sudo systemctl start vnpy-cta
 ```
 
 ## 8. 日常操作
@@ -197,6 +265,8 @@ journalctl -u vnpy-cta -n 50 | grep -E "(连接|订阅|换月|init)"
 | 环境变量没读到 | `sudo systemctl show vnpy-cta -p Environment` |
 | conda python 找不到 | `ls ~/miniconda3/envs/vnpy/bin/python` |
 | 权限问题 | chown ubuntu:ubuntu ~/vnpy-domestic -R |
+| 改 unit 文件后 start 报错/不生效 | 先 `sudo systemctl daemon-reload` |
+| status 显示 inactive 且无报错 | 凭证没注入（ConditionEnvironment 静默跳过），重跑 set-environment 再 start |
 
 ---
 
@@ -224,8 +294,10 @@ run_cta 主循环（1s 轮询）→ stop_all_strategies / init+start
 ### 配置
 
 1. secrets.yaml 填 6 个飞书控制 key（见 5.2 节），`feishu_host` 改 `0.0.0.0`
-2. 防火墙放行：`ufw allow 3000/tcp`
-3. 飞书后台「事件与回调」→ 订阅 `im.message.receive_v1` → 回调地址填 `http://公网IP:3000/webhook/feishu`
+2. 防火墙放行（两层都要，腾讯云安全组最容易漏）：
+   - 服务器本机：`sudo ufw allow 3000/tcp`
+   - 腾讯云控制台 → 该实例 → 安全组 → 入站规则 → 放行 TCP 3000 端口
+3. 飞书后台「事件与回调」→ 订阅 `im.message.receive_v1` → 回调地址填 **`http://`**（不是 https）`http://公网IP:3000/webhook/feishu`——uvicorn 起的是裸 HTTP 没配 TLS，填 https 会 TLS 握手失败、3 秒超时
 
 ### 说明
 

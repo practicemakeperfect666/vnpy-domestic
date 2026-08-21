@@ -161,6 +161,9 @@ def run_child(child_conn=None) -> None:
     except KeyboardInterrupt:
         logger.info("收到中断信号")
 
+    logger.info("发送当日盈亏汇总...")
+    cta_engine.send_daily_pl_summary()
+
     logger.info("每日收盘归零累计盈亏...")
     cta_engine.reset_daily_pl()
 

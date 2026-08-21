@@ -716,6 +716,44 @@ class RolloverCtaEngine(CtaEngine):
         for idx, batch in enumerate(batches, start=1):
             self.notify.send_status_summary(batch, total, idx, seq=self._status_seq)
 
+    def send_daily_pl_summary(self) -> None:
+        """收盘退出前发送当日盈亏汇总（已实现盈亏，点·手 × 合约乘数 = 金额）"""
+        lines = []
+        total = 0.0
+        for name, strategy in self.strategies.items():
+            is_locked = hasattr(strategy, "long_pos") and hasattr(strategy, "short_pos")
+            if is_locked:
+                pl_pts = getattr(strategy, "realized_pl", 0) or 0
+                long_pos = getattr(strategy, "long_pos", 0) or 0
+                short_pos = getattr(strategy, "short_pos", 0) or 0
+                pos_str = f"多{long_pos}/空{short_pos}"
+                if pl_pts == 0 and long_pos == 0 and short_pos == 0:
+                    continue
+            else:
+                pl_pts = self.strategy_cumulative_pl.get(name, 0) or 0
+                pos_str = f"{strategy.pos:+d}"
+                if pl_pts == 0 and strategy.pos == 0:
+                    continue
+
+            contract = self.main_engine.get_contract(strategy.vt_symbol)
+            size = contract.size if contract else 0
+            if size > 0:
+                total += pl_pts * size
+                pl_str = f"{pl_pts * size:+.2f} 元"
+            else:
+                pl_str = f"{pl_pts:+.2f} 点·手"
+            lines.append(
+                f"  {name}  {strategy.vt_symbol}\n"
+                f"    已实现: {pl_str} | 持仓: {pos_str}"
+            )
+
+        sep = "─" * 30
+        if not lines:
+            text = f"📊 当日盈亏汇总\n{sep}\n  今日无交易"
+        else:
+            text = f"📊 当日盈亏汇总\n{sep}\n" + "\n\n".join(lines) + f"\n{sep}\n  合计已实现: {total:+.2f} 元"
+        self.notify.send_text(text)
+
     def reset_daily_pl(self) -> None:
         """每日收盘归零累计盈亏：次日从 0 起统计当日盈亏（隔夜持仓按逐日盯市已结算，不影响）"""
         for name, strategy in self.strategies.items():

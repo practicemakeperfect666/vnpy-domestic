@@ -1,9 +1,6 @@
 # vnpy-domestic — 运行时数据/配置目录
 .vntrader/*
-!.vntrader/vt_setting.json
-!.vntrader/cta_strategy_setting.json
-!.vntrader/trading_times.csv
-!.vntrader/secrets.yaml
+
 
 # Python
 __pycache__/

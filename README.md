@@ -80,7 +80,7 @@ pip install vnpy_ctastrategy vnpy_ctp vnpy_sqlite
 ### 2. 安装依赖
 
 ```bash
-pip install pyyaml requests akshare psutil pandas
+pip install pyyaml requests akshare psutil pandas lark-oapi fastapi uvicorn
 ```
 
 | 包 | 用途 |
@@ -90,6 +90,8 @@ pip install pyyaml requests akshare psutil pandas
 | `akshare` | 免费期货行情数据源 |
 | `psutil` | 系统硬件监控（CPU/内存/磁盘） |
 | `pandas` | CSV 读写与数据整理 |
+| `lark-oapi` | 飞书控制（@机器人 停止/重启） |
+| `fastapi` / `uvicorn` | 飞书 HTTP 回调服务 |
 
 ### 3. 安装 TA-Lib
 
