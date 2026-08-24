@@ -2,7 +2,8 @@
 .vntrader/*
 
 # 策略代码（实盘专属，不提交）
-strategies/
+strategies/multi_layer.py
+strategies/multi_layer.md
 
 
 # Python
