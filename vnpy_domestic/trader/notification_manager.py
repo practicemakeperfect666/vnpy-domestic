@@ -231,7 +231,7 @@ class NotificationManager:
         lines.append("  " + "-" * 50)
 
         for p in real_positions:
-            dir_str = "多" if p.direction.value == "多" else "空"
+            dir_str = "多" if p.direction == Direction.LONG else "空"
             line = (f"  {p.vt_symbol:<14} {dir_str:<4} {p.volume:>4}  "
                     f"{p.price:>8.2f}  {p.pnl:>10.2f}")
             lines.append(line)
