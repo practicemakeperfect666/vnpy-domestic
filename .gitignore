@@ -1,6 +1,9 @@
 # vnpy-domestic — 运行时数据/配置目录
 .vntrader/*
 
+# 策略代码（实盘专属，不提交）
+strategies/
+
 
 # Python
 __pycache__/
