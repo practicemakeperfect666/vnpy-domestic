@@ -32,35 +32,31 @@ DAY_START = dtime(8, 45)
 DAY_END = dtime(15, 1)
 
 NIGHT_START = dtime(20, 45)
-NIGHT_END = dtime(2, 45)
+NIGHT_END = dtime(23, 5)        # 夜盘当日收盘（豆粕/白糖/螺纹/PTA/PVC 等 23:00 收）
 
-
+# 夜盘是否跨零点：跑到 01:00 收（有色）或 02:30 收（原油/贵金属）的品种时改 True
+NIGHT_CROSS_MIDNIGHT = False
+MIDNIGHT_END = dtime(2, 45)     # 跨零点夜盘延续截止（NIGHT_CROSS_MIDNIGHT=True 时生效）
 
 
 def check_trading_period() -> bool:
-    """检查当前是否在交易时段内（含周末过滤）"""
+    """检查当前是否在交易时段内（周六周日不交易；凌晨归前一交易日）"""
     now = datetime.now()
     weekday = now.weekday()
-    current_time = now.time()
+    t = now.time()
 
-    # 周六：只保留周五夜盘延续（凌晨 00:00~02:45）
-    if weekday == 5:
-        return current_time <= NIGHT_END
+    if NIGHT_CROSS_MIDNIGHT:
+        # 凌晨为前一交易日夜盘延续，只有周二~周六凌晨才有（周一凌晨、周日无盘）
+        if t <= MIDNIGHT_END:
+            return 1 <= weekday <= 5
+        if weekday >= 5:
+            return False
+        return (DAY_START <= t <= DAY_END) or (t >= NIGHT_START)
 
-    # 周日：只保留周日夜盘（21:00 起，为周一早盘做准备）
-    if weekday == 6:
-        return current_time >= NIGHT_START
-
-    # 周一 ~ 周五
-    trading = False
-    if (
-        (current_time >= DAY_START and current_time <= DAY_END)
-        or (current_time >= NIGHT_START)
-        or (current_time <= NIGHT_END)
-    ):
-        trading = True
-
-    return trading
+    # 夜盘不跨零点：周六周日全天不跑
+    if weekday >= 5:
+        return False
+    return (DAY_START <= t <= DAY_END) or (NIGHT_START <= t <= NIGHT_END)
 
 
 def load_ctp_setting() -> dict:
@@ -216,7 +212,7 @@ def run_parent() -> None:
     parent_conn = None
     restart_count = 0
     max_restart = 5
-    manual_stop = False  # stop 指令后阻止自动重启
+    manual_stop = False  # stop 指令后阻止自动重启，需人工 @机器人 发重启恢复
     child_start_time = 0.0  # 子进程启动时间戳（稳定运行过则重置崩溃计数）
 
     while True:
@@ -245,8 +241,11 @@ def run_parent() -> None:
                                 if child_process.is_alive():
                                     child_process.kill()
                             child_process = None
+                            reply = "停止已完成（后续时段不再自动启动，需 @机器人 发重启恢复）"
+                        else:
+                            reply = "当前无运行中的子进程，已置停止状态（需 @机器人 发重启恢复）"
                         reply_text(feishu.get("app_id"), feishu.get("app_secret"),
-                                   msg_id, "停止已完成")
+                                   msg_id, reply)
                     elif action == "restart":
                         manual_stop = False
                         if child_process is not None and child_process.is_alive():
