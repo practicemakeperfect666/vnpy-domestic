@@ -48,7 +48,9 @@ class Datafeed(BaseDatafeed):
         # CZCE: 1-digit year → 2-digit for Sina (MA610 → MA2610)
         if req.exchange == Exchange.CZCE:
             variety = ''.join(c for c in symbol if not c.isdigit())
-            symbol = variety + "2" + symbol[len(variety):]
+            digits = symbol[len(variety):]
+            if len(digits) == 3:
+                symbol = variety + str(datetime.now().year)[2] + digits
 
         # 调用 akshare 获取1分钟数据
         try:

@@ -2,7 +2,7 @@
   <br>
   <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python" alt="Python">
   <img src="https://img.shields.io/badge/vnpy-4.4.0-blue?style=flat-square" alt="vnpy">
-  <img src="https://img.shields.io/badge/version-0.1.1-brightgreen?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.1.2-brightgreen?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="License">
   <br><br>
 
@@ -11,6 +11,15 @@
   <span style="font-weight:300; font-size:1rem">基于 <a href="https://github.com/vnpy/vnpy">vnpy</a> 构建 · 专为国内期货实盘打磨</span></p>
   <br>
 </div>
+
+---
+
+## v0.1.2 更新（2026-08-26）
+
+- **合约代码统一规范化**：新增 `normalize_vt_symbol`，按交易所统一 CTP InstrumentID 格式——SHFE/INE/DCE/GFEX 小写、CZCE/CFFEX 大写、CZCE 年份 1 位
+- **修复 SHFE/INE/GFEX 换月失败**：原逻辑只对 DCE 转小写，SHFE 主力拼成 `RB2610.SHFE` 导致 `get_contract` 找不到、换月被跳过
+- **配置入口容错**：`add_strategy` 自动修正配置里写错的合约代码（如 `RB2701.SHFE` → `rb2701.SHFE`），修正结果写回 setting 文件并记日志
+- **akshare 年份前缀**：CZCE 补年份不再硬编码 "2"，改按当前年份推导
 
 ---
 
@@ -248,19 +257,29 @@ feishu_host: "127.0.0.1"             # 监听地址，Linux 服务器改 0.0.0.0
 | 字段 | 说明 |
 |:----|:-----|
 | `class_name` | 策略类名，需与代码中类名一致 |
-| `vt_symbol` | 合约代码，格式 `品种.交易所`，如 `rb2610.SHFE`、`i2609.DCE`、`sc2608.INE` |
+| `vt_symbol` | 合约代码，格式 `品种.交易所`，如 `rb2610.SHFE`、`m2701.DCE`、`MA610.CZCE` |
 | `setting` | 策略参数，需与策略类的 `parameters` 列表对应 |
 
-支持的交易所后缀：`SHFE`（上期所）、`DCE`（大商所）、`CZCE`（郑商所）、`INE`（能源中心）、`CFFEX`（中金所）。
+支持的交易所后缀：`SHFE`（上期所）、`DCE`（大商所）、`CZCE`（郑商所）、`INE`（能源中心）、`GFEX`（广期所）、`CFFEX`（中金所）。
 
-> **⚠ CZCE（郑商所）合约年份注意事项：** CZCE 合约代码年份仅用 1 位数字
-> （如 `MA610` = 2026 年 10 月），其他交易所用 2 位（如 `rb2610`）。
-> 本项目的换月引擎和数据源已做自动转换：
-> 
-> - **换月方向**（Sina → CTP）：去小写 + 去首位数 → `MA2610` → `MA610.CZCE`
-> - **数据加载方向**（CTP → akshare）：补 "2" → `MA610` → `MA2610` 查询 Sina
-> 
-> 编写策略配置时直接用 CTP 格式（1 位年）即可，如 `MA610.CZCE`。
+> **⚠ 合约代码大小写与年份位数（CTP InstrumentID 规范）：**
+> CTP 的合约代码大小写按交易所而定，写错会导致 `unable to find contract` 订阅失败、
+> 换月时 `找不到新合约` 跳过换月：
+>
+> | 交易所 | 字母 | 年份位数 | 示例 |
+> |:---|:---|:---|:---|
+> | SHFE / INE | 小写 | 2 位 | `rb2610.SHFE`、`sc2610.INE` |
+> | DCE / GFEX | 小写 | 2 位 | `m2701.DCE`、`si2611.GFEX` |
+> | CZCE | 大写 | **1 位** | `MA610.CZCE`、`SA701.CZCE` |
+> | CFFEX | 大写 | 2 位 | `IF2609.CFFEX` |
+>
+> 引擎已统一处理，无需手写正确格式也能跑：
+>
+> - **配置入口**：`add_strategy` 调用 `normalize_vt_symbol` 规范化，`RB2610.SHFE` → `rb2610.SHFE`、
+>   `RM2701.CZCE` → `RM701.CZCE`，修正结果写回 `cta_strategy_setting.json` 并记日志
+> - **换月方向**（Sina → CTP）：新浪统一返回大写 2 位年（`RB2610`/`MA2610`），
+>   按交易所转小写/大写 + CZCE 截年份 → `rb2610.SHFE`/`MA610.CZCE`
+> - **数据加载方向**（CTP → akshare）：CZCE 按当前年份补年份前缀 → `MA610` → `MA2610` 查询 Sina
 
 ### vt_setting.json（数据源配置）
 
@@ -317,7 +336,9 @@ Linux 服务器部署（systemd 守护 + CTP 凭证环境变量注入）见 `vnp
 
 继承 `CtaEngine`，叠加自动换月、成交通知、P&L 追踪和 CTP 断连监控。
 
-**换月逻辑：** 使用新浪财经 API 按持仓量匹配主力——请求 `nf_XXX0` 连续合约和 24 个月合约，持仓量一致的即为主力。换月执行前先 `get_contract` 验证新合约存在，不存在则跳过不动状态。换月检查分三个时机：初始化时静默记录（`_check_rollover_for_init`）、初始化后汇总推送（`send_rollover_init_summary`）、无持仓时即时检查（`_check_and_notify_rollover`）。换月后保留累计盈亏（当日已实现盈亏跨合约延续）。
+**换月逻辑：** 使用新浪财经 API 按持仓量匹配主力——请求 `nf_XXX0` 连续合约和 24 个月合约，持仓量一致的即为主力。新浪返回的代码统一经 `normalize_vt_symbol` 转成 CTP InstrumentID 格式（SHFE/INE/DCE/GFEX 小写、CZCE/CFFEX 大写、CZCE 年份截为 1 位），避免拼出 `RB2610.SHFE` 这类 CTP 查不到的代码。换月执行前先 `get_contract` 验证新合约存在，不存在则跳过不动状态。换月检查分三个时机：初始化时静默记录（`_check_rollover_for_init`）、初始化后汇总推送（`send_rollover_init_summary`）、无持仓时即时检查（`_check_and_notify_rollover`）。换月后保留累计盈亏（当日已实现盈亏跨合约延续）。
+
+**合约代码规范化：** `normalize_vt_symbol(vt_symbol)` 是全局唯一的代码格式入口，`add_strategy` 加载配置时先规范化再建策略（写错大小写/年份位数也能订阅成功，修正会写回 `cta_strategy_setting.json` 并记日志），换月比对也用规范化后的 `vt_symbol` 判断是否变化。
 
 **锁仓优化（换月判断）：** 换月前用 `_has_position` 判断是否实际有持仓，而非只看净持仓 `pos`——只有 `pos == 0` 且锁仓的 `long_pos`/`short_pos` 都为 0 才换月。锁仓策略（多空对冲，净持仓 0 但两边各持有一手）不会被误判为空仓触发换月，避免换月导致持仓错位；开平仓通知显示「多X/空Y」，非锁仓策略走引擎持仓批次（`position_lots`）。
 
@@ -351,7 +372,7 @@ Linux 服务器部署（systemd 守护 + CTP 凭证环境变量注入）见 `vnp
 
 ### AKShare 数据源
 
-通过 `sys.modules` 别名注册为 vnpy 原生数据源。调用 `akshare.futures_zh_minute_sina()` 获取 1 分钟 K 线，仅支持 `Interval.MINUTE`，其他周期返回空列表。CZCE 合约自动补 "2" 年份前缀（`MA610` → `MA2610`）。
+通过 `sys.modules` 别名注册为 vnpy 原生数据源。调用 `akshare.futures_zh_minute_sina()` 获取 1 分钟 K 线，仅支持 `Interval.MINUTE`，其他周期返回空列表。CZCE 合约按当前年份补 2 位年份前缀（`MA610` → `MA2610`，跨年份自动适配，不再硬编码 "2"）。
 
 ### 交易时段更新
 

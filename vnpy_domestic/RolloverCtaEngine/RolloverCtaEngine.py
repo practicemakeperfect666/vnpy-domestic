@@ -22,6 +22,39 @@ from vnpy_ctastrategy.engine import CtaEngine
 from vnpy_domestic.trader.notification_manager import NotificationManager
 from vnpy_domestic.trader.position_lots import trading_day, settle_close
 
+# CTP InstrumentID 字母小写的交易所，其余（CZCE/CFFEX）大写
+LOWER_CASE_EXCHANGES = ("DCE", "SHFE", "INE", "GFEX")
+
+
+def normalize_vt_symbol(vt_symbol: str) -> str:
+    """统一合约代码为 CTP InstrumentID 格式（字母大小写 + 年份位数）
+
+    rb2610/cu2610/sc2610（SHFE/INE 小写）、m2701/si2611（DCE/GFEX 小写）、
+    MA701/IF2609（CZCE/CFFEX 大写，CZCE 年份 1 位）
+    """
+    if "." not in vt_symbol:
+        return vt_symbol
+
+    symbol, exchange = vt_symbol.rsplit(".", 1)
+    exchange = exchange.upper()
+    variety = "".join(c for c in symbol if not c.isdigit())
+    digits = symbol[len(variety):]
+    if not variety or not digits.isdigit():
+        return f"{symbol}.{exchange}"
+
+    if exchange == "CZCE":
+        if len(digits) == 4:            # RM2701 -> RM701
+            digits = digits[1:]
+    elif len(digits) == 3:              # rb610 -> rb2610
+        digits = str(datetime.now().year)[2] + digits
+
+    if exchange in LOWER_CASE_EXCHANGES:
+        variety = variety.lower()
+    else:
+        variety = variety.upper()
+
+    return f"{variety}{digits}.{exchange}"
+
 
 class RolloverCtaEngine(CtaEngine):
     """
@@ -325,17 +358,10 @@ class RolloverCtaEngine(CtaEngine):
             self.write_log(f"换月检查失败：无法获取 {variety} 主力合约信息")
             return
 
-        if exchange.upper() == "CZCE":
-            main_contract = main_contract[:len(variety)] + main_contract[len(variety)+1:]
-
-        # DCE 品种 CTP 存小写，新浪返回大写，需转小写
-        if exchange.upper() == "DCE":
-            main_contract = main_contract.lower()
-
-        if main_contract.lower() == symbol.lower():
+        new_vt_symbol = normalize_vt_symbol(f"{main_contract}.{exchange}")
+        if new_vt_symbol == normalize_vt_symbol(strategy.vt_symbol):
             return
 
-        new_vt_symbol = f"{main_contract}.{exchange}"
         self.write_log(f"策略 [{strategy.strategy_name}] 检测到主力合约变化：{strategy.vt_symbol} -> {new_vt_symbol}")
 
         if not self._has_position(strategy):
@@ -782,6 +808,15 @@ class RolloverCtaEngine(CtaEngine):
         self.strategy_data[strategy.strategy_name] = data
         save_json(self.data_filename, self.strategy_data)
 
+    def add_strategy(
+        self, class_name: str, strategy_name: str, vt_symbol: str, setting: dict
+    ) -> None:
+        """添加策略前统一合约代码大小写与年份位数（配置写错也能订阅成功）"""
+        fixed = normalize_vt_symbol(vt_symbol)
+        if fixed != vt_symbol:
+            self.write_log(f"策略 [{strategy_name}] 合约代码已规范化：{vt_symbol} -> {fixed}")
+        super().add_strategy(class_name, strategy_name, fixed, setting)
+
     def _init_strategy(self, strategy_name: str) -> None:
         """翻写：初始化前检查是否需要换月，仅记录结果不发通知"""
         strategy = self.strategies.get(strategy_name)
@@ -832,18 +867,11 @@ class RolloverCtaEngine(CtaEngine):
             self._rollover_init_results[name] = "failed"
             return
 
-        if exchange.upper() == "CZCE":
-            main_contract = main_contract[:len(variety)] + main_contract[len(variety)+1:]
-
-        # DCE 品种 CTP 存小写，新浪返回大写，需转小写
-        if exchange.upper() == "DCE":
-            main_contract = main_contract.lower()
-
-        if main_contract.lower() == symbol.lower():
+        new_vt_symbol = normalize_vt_symbol(f"{main_contract}.{exchange}")
+        if new_vt_symbol == normalize_vt_symbol(strategy.vt_symbol):
             self._rollover_init_results[name] = "no_change"
             return
 
-        new_vt_symbol = f"{main_contract}.{exchange}"
         self.write_log(f"策略 [{name}] 检测到主力合约变化：{strategy.vt_symbol} -> {new_vt_symbol}")
 
         if not self._has_position(strategy):
