@@ -9,6 +9,11 @@ from datetime import datetime
 from datetime import time as dtime
 from time import sleep
 
+# Ensure datetime.now() returns Beijing time (server may run UTC)
+os.environ.setdefault("TZ", "Asia/Shanghai")
+if hasattr(time_mod, "tzset"):
+    time_mod.tzset()
+
 from vnpy.event import EventEngine
 from vnpy.trader.engine import MainEngine
 from vnpy.trader.logger import INFO, logger

@@ -16,9 +16,10 @@ __pycache__/
 dist/
 build/
 
-# IDE
+# IDE / 工具
 .vscode/
 .idea/
+.kilo/
 
 # OS
 Thumbs.db
