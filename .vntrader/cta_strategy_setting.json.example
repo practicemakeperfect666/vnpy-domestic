@@ -1,0 +1,11 @@
+{
+    "DualMa_m": {
+        "class_name": "DualMaStrategy",
+        "vt_symbol": "m2701.DCE",
+        "setting": {
+            "fast_period": 10,
+            "slow_period": 30,
+            "fixed_size": 1
+        }
+    }
+}
