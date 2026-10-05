@@ -60,6 +60,7 @@ feishu_public_url: "https://你的域名"     # 本地 Windows 用 localtunnel �
 
 不配置 feishu_app_id 则不启用，通知功能（notification_manager 的群 webhook）不受影响。
 """
+
 import json
 import logging
 import os
@@ -73,8 +74,12 @@ import yaml
 warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*")
 
 # 飞书 API 请求必须直连，不能走 Clash 代理（否则 reply 被 RemoteDisconnected 打断）
-os.environ["NO_PROXY"] = os.environ.get("NO_PROXY", "") + ",open.feishu.cn,*.feishu.cn,127.0.0.1,localhost"
-os.environ["no_proxy"] = os.environ.get("no_proxy", "") + ",open.feishu.cn,*.feishu.cn,127.0.0.1,localhost"
+os.environ["NO_PROXY"] = (
+    os.environ.get("NO_PROXY", "") + ",open.feishu.cn,*.feishu.cn,127.0.0.1,localhost"
+)
+os.environ["no_proxy"] = (
+    os.environ.get("no_proxy", "") + ",open.feishu.cn,*.feishu.cn,127.0.0.1,localhost"
+)
 
 logger = logging.getLogger("feishu_control")
 
@@ -82,9 +87,11 @@ logger = logging.getLogger("feishu_control")
 def load_feishu_control() -> dict:
     """从 secrets.yaml 读飞书控制凭证，缺 app_id 返回空 dict（= 不启用控制）"""
     secrets = {}
-    for p in [Path.cwd() / ".vntrader" / "secrets.yaml",
-              Path(__file__).resolve().parent.parent.parent / ".vntrader" / "secrets.yaml",
-              Path.home() / ".vntrader" / "secrets.yaml"]:
+    for p in [
+        Path.cwd() / ".vntrader" / "secrets.yaml",
+        Path(__file__).resolve().parent.parent.parent / ".vntrader" / "secrets.yaml",
+        Path.home() / ".vntrader" / "secrets.yaml",
+    ]:
         if p.exists():
             with open(p, encoding="utf-8") as f:
                 secrets = yaml.safe_load(f) or {}
@@ -107,33 +114,50 @@ def reply_text(app_id, app_secret, msg_id, text):
     try:
         import lark_oapi as lark
         from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+
         client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
-        req = ReplyMessageRequest.builder().message_id(msg_id).request_body(
-            ReplyMessageRequestBody.builder().msg_type("text")
-            .content(json.dumps({"text": text})).build()
-        ).build()
+        req = (
+            ReplyMessageRequest.builder()
+            .message_id(msg_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .msg_type("text")
+                .content(json.dumps({"text": text}))
+                .build()
+            )
+            .build()
+        )
         client.im.v1.message.reply(req)
     except Exception as e:
         logger.error(f"飞书回复失败: {e}")
 
 
-def build_control_app(ctrl_queue, app_id, app_secret, encrypt_key,
-                      verification_token, bot_open_id):
+def build_control_app(
+    ctrl_queue, app_id, app_secret, encrypt_key, verification_token, bot_open_id
+):
     """构建 FastAPI app：回调验签解密 + 指令入队 + 回复"""
     import lark_oapi as lark
     from lark_oapi.core.model import RawRequest
     from lark_oapi.api.im.v1 import (
         P2ImMessageReceiveV1,
-        ReplyMessageRequest, ReplyMessageRequestBody,
+        ReplyMessageRequest,
+        ReplyMessageRequestBody,
     )
     from fastapi import FastAPI, Request
     from fastapi.responses import Response
 
     def _reply(client, msg_id, text):
-        req = ReplyMessageRequest.builder().message_id(msg_id).request_body(
-            ReplyMessageRequestBody.builder().msg_type("text")
-            .content(json.dumps({"text": text})).build()
-        ).build()
+        req = (
+            ReplyMessageRequest.builder()
+            .message_id(msg_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .msg_type("text")
+                .content(json.dumps({"text": text}))
+                .build()
+            )
+            .build()
+        )
         client.im.v1.message.reply(req)
 
     def _is_mentioned(mentions):
@@ -142,7 +166,9 @@ def build_control_app(ctrl_queue, app_id, app_secret, encrypt_key,
                 return True
         return False
 
-    _seen_msg_ids = deque(maxlen=200)   # message_id 去重（飞书重试/重复推送只处理一次，替代 3 秒窗口）
+    _seen_msg_ids = deque(
+        maxlen=200
+    )  # message_id 去重（飞书重试/重复推送只处理一次，替代 3 秒窗口）
 
     def on_message(data: P2ImMessageReceiveV1):
         msg = data.event.message
@@ -152,9 +178,13 @@ def build_control_app(ctrl_queue, app_id, app_secret, encrypt_key,
         _seen_msg_ids.append(msg.message_id)
         mentions = getattr(msg, "mentions", None) or []
         mention_ids = [m.id.open_id for m in mentions] if mentions else []
-        logger.info(f"[飞书控制] 收到消息 type={msg.message_type} mentions={mention_ids} bot_open_id={bot_open_id}")
+        logger.info(
+            f"[飞书控制] 收到消息 type={msg.message_type} mentions={mention_ids} bot_open_id={bot_open_id}"
+        )
         if msg.message_type != "text" or not _is_mentioned(mentions):
-            logger.info(f"[飞书控制] 忽略: type={msg.message_type} 被@={_is_mentioned(mentions)}")
+            logger.info(
+                f"[飞书控制] 忽略: type={msg.message_type} 被@={_is_mentioned(mentions)}"
+            )
             return
         content = json.loads(msg.content)
         text = content.get("text", "").strip()
@@ -174,9 +204,11 @@ def build_control_app(ctrl_queue, app_id, app_secret, encrypt_key,
             _reply(client, msg.message_id, "收到信息")
 
     # 注意：on_message 必须先定义再 register（否则 NameError）
-    event_handler = lark.EventDispatcherHandler.builder(encrypt_key, verification_token) \
-        .register_p2_im_message_receive_v1(on_message) \
+    event_handler = (
+        lark.EventDispatcherHandler.builder(encrypt_key, verification_token)
+        .register_p2_im_message_receive_v1(on_message)
         .build()
+    )
 
     app = FastAPI()
 
@@ -189,10 +221,12 @@ def build_control_app(ctrl_queue, app_id, app_secret, encrypt_key,
         raw_req.uri = request.url.path
         raw_req.body = body
         raw_req.headers = dict(request.headers)
-        raw_resp = event_handler.do(raw_req)   # 内部完成解密 + 验签 + URL 验证
-        return Response(content=raw_resp.content,
-                        status_code=raw_resp.status_code,
-                        headers=dict(raw_resp.headers))
+        raw_resp = event_handler.do(raw_req)  # 内部完成解密 + 验签 + URL 验证
+        return Response(
+            content=raw_resp.content,
+            status_code=raw_resp.status_code,
+            headers=dict(raw_resp.headers),
+        )
 
     return app
 
@@ -200,6 +234,7 @@ def build_control_app(ctrl_queue, app_id, app_secret, encrypt_key,
 def start_control(app, host="127.0.0.1", port=3000):
     """阻塞运行 uvicorn（放独立线程；非主线程安全）"""
     import uvicorn
+
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     uvicorn.Server(config).run()
 ```
@@ -222,14 +257,22 @@ def start_control(app, host="127.0.0.1", port=3000):
 ctrl_queue = queue.Queue()
 feishu = load_feishu_control()
 if feishu.get("app_id"):
-    app = build_control_app(ctrl_queue, feishu["app_id"], feishu["app_secret"],
-                            feishu["encrypt_key"], feishu["verification_token"],
-                            feishu["bot_open_id"])
-    threading.Thread(target=start_control,
-                     args=(app, feishu["host"], 3000), daemon=True).start()
+    app = build_control_app(
+        ctrl_queue,
+        feishu["app_id"],
+        feishu["app_secret"],
+        feishu["encrypt_key"],
+        feishu["verification_token"],
+        feishu["bot_open_id"],
+    )
+    threading.Thread(
+        target=start_control, args=(app, feishu["host"], 3000), daemon=True
+    ).start()
     print(f"飞书 HTTP 控制已启动（父进程），监听 {feishu['host']}:3000", flush=True)
     if feishu.get("public_url"):
-        print(f"飞书后台「请求地址」填: {feishu['public_url']}/webhook/feishu", flush=True)
+        print(
+            f"飞书后台「请求地址」填: {feishu['public_url']}/webhook/feishu", flush=True
+        )
 ```
 
 主循环每轮 `get_nowait()` 取指令执行：

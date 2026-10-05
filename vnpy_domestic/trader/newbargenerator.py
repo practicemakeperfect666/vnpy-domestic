@@ -5,17 +5,16 @@ vnpy 增强版工具模块，包含：
   - 交易时段加载/运行时判断（竞价位移、非交易时段过滤）
   - MyBarGenerator  —— 增强版 BarGenerator
 """
+
 from __future__ import annotations
 
 import csv
 from datetime import datetime, time, timedelta
 from pathlib import Path
-from typing import Optional
 
 from vnpy.trader.constant import Interval
 from vnpy.trader.object import BarData, TickData
 from vnpy.trader.utility import BarGenerator as _BarGenerator
-
 
 # ═══════════════════════════════════════════════════════════
 # 第一部分：交易时段管理
@@ -67,7 +66,7 @@ _pkg_root = Path(__file__).resolve().parent.parent.parent
 _DEFAULT_CSV_PATHS.insert(0, _pkg_root / ".vntrader" / "trading_times.csv")
 
 
-def reload_trading_times(csv_path: Optional[Path] = None) -> bool:
+def reload_trading_times(csv_path: Path | None = None) -> bool:
     """重新加载交易时段数据，返回是否加载成功"""
     global _TRADING_SESSIONS, _SORTED_PIDS
 
@@ -165,7 +164,7 @@ def is_auction_time(symbol: str, dt: datetime) -> bool:
     return False
 
 
-def get_auction_session_start(symbol: str, dt: datetime) -> Optional[datetime]:
+def get_auction_session_start(symbol: str, dt: datetime) -> datetime | None:
     """返回竞价 tick 对应的开盘时间（秒=0，微秒=0）"""
     pid = _extract_product_id(symbol)
     if not pid or pid not in _TRADING_SESSIONS:
@@ -180,16 +179,21 @@ def get_auction_session_start(symbol: str, dt: datetime) -> Optional[datetime]:
         auction_start = _time_subtract_minute(start)
         if auction_start <= start:
             if auction_start <= t < start:
-                return dt.replace(hour=start.hour, minute=start.minute, second=0, microsecond=0)
+                return dt.replace(
+                    hour=start.hour, minute=start.minute, second=0, microsecond=0
+                )
         else:
             if t >= auction_start or t < start:
-                return dt.replace(hour=start.hour, minute=start.minute, second=0, microsecond=0)
+                return dt.replace(
+                    hour=start.hour, minute=start.minute, second=0, microsecond=0
+                )
     return None
 
 
 # ═══════════════════════════════════════════════════════════
 # 第二部分：增强版 BarGenerator
 # ═══════════════════════════════════════════════════════════
+
 
 class MyBarGenerator(_BarGenerator):
     """增强版 BarGenerator：竞价处理 + 交易时段过滤 + 跨段 volume 正确计算"""
@@ -202,9 +206,13 @@ class MyBarGenerator(_BarGenerator):
         interval: Interval = Interval.MINUTE,
         daily_end=None,
         enable_trading_filter: bool = True,
+        kline_writer=None,
     ):
         super().__init__(on_bar, window, on_window_bar, interval, daily_end)
         self.enable_trading_filter: bool = enable_trading_filter
+        self.kline_writer = (
+            kline_writer  # optional callback(BarData) for Kline persistence
+        )
 
     def update_tick(self, tick: TickData) -> None:
         """重写 update_tick"""
@@ -218,7 +226,9 @@ class MyBarGenerator(_BarGenerator):
             if new_dt:
                 tick.datetime = new_dt
 
-        elif self.enable_trading_filter and not is_trading_time(tick.symbol, tick.datetime):
+        elif self.enable_trading_filter and not is_trading_time(
+            tick.symbol, tick.datetime
+        ):
             return
 
         if not self.bar:
@@ -229,6 +239,8 @@ class MyBarGenerator(_BarGenerator):
         ):
             self.bar.datetime = self.bar.datetime.replace(second=0, microsecond=0)
             self.on_bar(self.bar)
+            if self.kline_writer:
+                self.kline_writer(self.bar)
             new_minute = True
 
         if new_minute:

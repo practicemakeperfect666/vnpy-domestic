@@ -1,26 +1,74 @@
 # rollover_cta_engine.py
+import os
 import time
-import csv
 from datetime import datetime
-from typing import Optional, Dict
 
+import psutil
 import requests
 from vnpy.event import Event, EventEngine
+from vnpy.trader.constant import Direction, Offset, Status
 from vnpy.trader.engine import MainEngine
+from vnpy.trader.event import EVENT_ACCOUNT, EVENT_TIMER
 from vnpy.trader.object import (
+    OrderData,
     SubscribeRequest,
     TradeData,
-    OrderData,
 )
-from vnpy.trader.constant import Direction, Status, Offset
-from vnpy.trader.utility import save_json, get_file_path
-from vnpy.trader.event import EVENT_TIMER, EVENT_ACCOUNT
-
+from vnpy.trader.utility import save_json
 from vnpy_ctastrategy import CtaTemplate
 from vnpy_ctastrategy.engine import CtaEngine
 
 from vnpy_domestic.trader.notification_manager import NotificationManager
-from vnpy_domestic.trader.position_lots import trading_day, settle_close
+from vnpy_domestic.trader.position_lots import settle_close, trading_day
+
+try:
+    from web_backend.models import (
+        Account as MonitorAccount,
+    )
+    from web_backend.models import (
+        Contract as MonitorContract,
+    )
+    from web_backend.models import (
+        DailyPnl as MonitorDailyPnl,
+    )
+    from web_backend.models import (
+        Kline as MonitorKline,
+    )
+    from web_backend.models import (
+        Log as MonitorLog,
+    )
+    from web_backend.models import (
+        Order as MonitorOrder,
+    )
+    from web_backend.models import (
+        Position as MonitorPosition,
+    )
+    from web_backend.models import (
+        AccountPosition as MonitorAccountPosition,
+    )
+    from web_backend.models import (
+        AccountDailyPnl as MonitorAccountDailyPnl,
+    )
+    from web_backend.models import (
+        StrategyIntraday as MonitorStrategyIntraday,
+    )
+    from web_backend.models import (
+        StrategyStatus as MonitorStrategyStatus,
+    )
+    from web_backend.models import (
+        SystemMetric as MonitorSystemMetric,
+    )
+    from web_backend.models import (
+        Trade as MonitorTrade,
+    )
+    from web_backend.models import (
+        TradeRound as MonitorTradeRound,
+    )
+    from web_backend.writer import MonitorWriter
+
+    _MONITOR_AVAILABLE = True
+except ImportError:
+    _MONITOR_AVAILABLE = False
 
 # CTP InstrumentID 字母小写的交易所，其余（CZCE/CFFEX）大写
 LOWER_CASE_EXCHANGES = ("DCE", "SHFE", "INE", "GFEX")
@@ -38,14 +86,14 @@ def normalize_vt_symbol(vt_symbol: str) -> str:
     symbol, exchange = vt_symbol.rsplit(".", 1)
     exchange = exchange.upper()
     variety = "".join(c for c in symbol if not c.isdigit())
-    digits = symbol[len(variety):]
+    digits = symbol[len(variety) :]
     if not variety or not digits.isdigit():
         return f"{symbol}.{exchange}"
 
     if exchange == "CZCE":
-        if len(digits) == 4:            # RM2701 -> RM701
+        if len(digits) == 4:  # RM2701 -> RM701
             digits = digits[1:]
-    elif len(digits) == 3:              # rb610 -> rb2610
+    elif len(digits) == 3:  # rb610 -> rb2610
         digits = str(datetime.now().year)[2] + digits
 
     if exchange in LOWER_CASE_EXCHANGES:
@@ -59,7 +107,7 @@ def normalize_vt_symbol(vt_symbol: str) -> str:
 class RolloverCtaEngine(CtaEngine):
     """
     支持自动换月的 CTA 引擎，并集成：
-    - 订单/成交实时通知（钉钉/飞书）+ CSV 持久化
+    - 订单/成交实时通知（钉钉/飞书）+ 监控写库（monitor.db）
     - 每5分钟策略运行状态监控
     - 主力合约变化自动换月（持仓为0时）
     """
@@ -72,26 +120,25 @@ class RolloverCtaEngine(CtaEngine):
         # 设置日志回调
         self.notify.set_log_callback(self.write_log)
 
-        # CSV 文件存储
-        self.strategy_csv_files: Dict[str, Dict[str, str]] = {}
-
         # 发单时间跟踪（用于成交延迟监控）
-        self.order_submit_times: Dict[str, datetime] = {}
+        self.order_submit_times: dict[str, datetime] = {}
 
         # 定时监控相关
         self.last_monitor_time: float = 0.0
         self.monitor_interval: int = 420  # 7分钟 = 420秒
 
         # P&L 追踪（用于平仓推送盈亏）
-        self.strategy_lots: Dict[str, list] = {}       # strategy_name -> [[vol, price, day], ...]
-        self.strategy_cumulative_pl: Dict[str, float] = {}
+        self.strategy_lots: dict[
+            str, list
+        ] = {}  # strategy_name -> [[vol, price, day], ...]
+        self.strategy_cumulative_pl: dict[str, float] = {}
 
         # 订单缓存（用于滑点计算）
         self.orders: dict = {}
 
         # 每日订单状态统计（挂撤单/未成交等）
         self._daily_order_counts: dict = {}
-        self._daily_order_ids: set = set()   # 当天唯一订单号（"共N笔"去重用）
+        self._daily_order_ids: set = set()  # 当天唯一订单号（"共N笔"去重用）
         self._order_stat_date: str = ""
 
         # NOTTRADED 通知去重（避免 CTP 重复推送刷屏）
@@ -116,67 +163,45 @@ class RolloverCtaEngine(CtaEngine):
         # 注册账户事件（用于 CTP 连接心跳检测）
         self.event_engine.register(EVENT_ACCOUNT, self._on_account_event)
 
+        # ── 监控写库（可选：设置 MONITOR_DB_PATH 才启用，非阻塞不干扰交易） ──
+        self.monitor = None
+        if _MONITOR_AVAILABLE:
+            db_path = os.getenv("MONITOR_DB_PATH")
+            if db_path:
+                self.monitor = MonitorWriter(db_path)
+        self.account = os.getenv("CTP_MODE", "real")
+
+        # ── 高频快照缓存（3s 浮动盈亏/保证金计算用） ──
+        self.last_prices: dict = {}  # vt_symbol -> last_price
+        self._last_snapshot_time: float = 0.0
+        self._accountid: str = ""
+        self._last_balance: float = 0.0
+        self._last_available: float = 0.0
+        self._last_frozen: float = 0.0
+        self._today_realized_pl: float = 0.0
+        self._today_trading_day: str = ""
+        self._last_intraday_time: float = 0.0
+
     # ----------------------------------------------------------------------
     # write_log 重写：日志写文件 + 错误级日志推手机
     # ----------------------------------------------------------------------
     def write_log(self, msg: str, strategy: CtaTemplate = None) -> None:
         """重写：写日志 + 推送失败/错误级日志到手机"""
         super().write_log(msg, strategy)
+        monitor = getattr(self, "monitor", None)
+        if monitor:
+            level = "ERROR" if ("失败" in msg or "错误" in msg) else "INFO"
+            monitor.write(
+                MonitorLog(
+                    ts=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    level=level,
+                    strategy=strategy.strategy_name if strategy else "",
+                    account=getattr(self, "account", "real"),
+                    message=msg,
+                )
+            )
         if "失败" in msg or "错误" in msg:
             self.notify.send_text(f"⚠️ CTA 异常\n  {msg.strip()}")
-
-    # ----------------------------------------------------------------------
-    # CSV 初始化
-    # ----------------------------------------------------------------------
-    def _init_csv_files(self, strategy_name: str) -> None:
-        """为策略创建订单/成交/持仓 CSV（每策略一个文件夹，在 .vntrader/strategy_records/ 下）"""
-        folder = get_file_path(f"strategy_records/{strategy_name}")
-        folder.mkdir(parents=True, exist_ok=True)
-        order_csv = folder / "orders.csv"
-        trade_csv = folder / "trades.csv"
-        position_csv = folder / "positions.csv"
-
-        if not order_csv.exists():
-            with open(order_csv, "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "datetime", "symbol", "exchange", "orderid",
-                    "direction", "offset", "price", "volume",
-                    "traded", "status"
-                ])
-
-        if not trade_csv.exists():
-            with open(trade_csv, "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "datetime", "symbol", "exchange", "orderid",
-                    "tradeid", "direction", "offset", "price", "volume",
-                    "slippage", "delay_ms", "avg_price"
-                ])
-
-        if not position_csv.exists():
-            with open(position_csv, "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "datetime", "symbol", "exchange", "direction", "offset",
-                    "trade_price", "trade_volume",
-                    "pos", "long_pos", "short_pos", "long_avg", "short_avg",
-                    "avg_cost", "cumulative_pl"
-                ])
-
-        self.strategy_csv_files[strategy_name] = {
-            "order": str(order_csv),
-            "trade": str(trade_csv),
-            "position": str(position_csv)
-        }
-
-    def _append_csv(self, label: str, csv_path: str, row: list) -> None:
-        """追加一行到 CSV 文件"""
-        try:
-            with open(csv_path, "a", newline="", encoding="utf-8-sig") as f:
-                csv.writer(f).writerow(row)
-        except Exception as e:
-            self.write_log(f"{label} CSV写入异常: {e}")
 
     @staticmethod
     def _lots_avg(lots) -> float:
@@ -188,35 +213,108 @@ class RolloverCtaEngine(CtaEngine):
             return 0.0
         return sum(b[0] * b[1] for b in lots) / total_v
 
-    def _append_position_csv(self, strategy: CtaTemplate, strategy_name: str,
-                             trade_dict: dict) -> None:
-        """每次成交后追加一行持仓快照（锁仓策略多空分记，非锁仓走引擎批次）"""
+    def _calc_position_pnl(
+        self, vt_symbol: str, direction: str, volume: float, avg_price: float
+    ) -> float:
+        """浮动盈亏 = (最新价 - 持仓均价) × 手数 × 乘数 × 方向"""
+        if not avg_price or not volume:
+            return 0.0
+        last = self.last_prices.get(vt_symbol)
+        if not last:
+            return 0.0
+        contract = self.main_engine.get_contract(vt_symbol)
+        size = contract.size if contract else 0
+        if not size:
+            return 0.0
+        mult = 1 if direction == "long" else -1
+        return (last - avg_price) * volume * size * mult
+
+    def _write_position_snapshot(
+        self, strategy: CtaTemplate, strategy_name: str
+    ) -> None:
+        """每次成交后写持仓快照（锁仓策略多空分记，非锁仓走引擎批次）"""
         is_locked = hasattr(strategy, "long_pos") and hasattr(strategy, "short_pos")
         long_pos = getattr(strategy, "long_pos", 0) or 0
         short_pos = getattr(strategy, "short_pos", 0) or 0
         if is_locked:
-            cum_pl = getattr(strategy, "realized_pl", 0) or 0
             long_avg = self._lots_avg(getattr(strategy, "long_lots", None))
             short_avg = self._lots_avg(getattr(strategy, "short_lots", None))
             avg_cost = 0.0
         else:
-            cum_pl = self.strategy_cumulative_pl.get(strategy_name, 0) or 0
             long_avg = short_avg = 0.0
             avg_cost = self._lots_avg(self.strategy_lots.get(strategy_name))
-        csv_file = self.strategy_csv_files[strategy_name]["position"]
-        self._append_csv(f"持仓 {strategy_name}", csv_file, [
-            trade_dict["datetime"], trade_dict["symbol"], trade_dict["exchange"],
-            trade_dict["direction"], trade_dict["offset"],
-            trade_dict["price"], trade_dict["volume"],
-            strategy.pos, long_pos, short_pos,
-            round(long_avg, 2), round(short_avg, 2),
-            round(avg_cost, 2), round(cum_pl, 2),
-        ])
+
+        # ── 监控写库：持仓快照 ──
+        monitor = getattr(self, "monitor", None)
+        if monitor:
+            account = getattr(self, "account", "real")
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            vt_symbol = strategy.vt_symbol
+            td = trading_day(datetime.now())
+            if is_locked:
+                if long_pos:
+                    monitor.write(
+                        MonitorPosition(
+                            strategy=strategy_name,
+                            account=account,
+                            vt_symbol=vt_symbol,
+                            direction="LONG",
+                            volume=long_pos,
+                            avg_price=round(long_avg, 2),
+                            pnl=round(
+                                self._calc_position_pnl(
+                                    vt_symbol, "long", long_pos, long_avg
+                                ),
+                                2,
+                            ),
+                            trading_day=td,
+                            snapshot_time=now,
+                        )
+                    )
+                if short_pos:
+                    monitor.write(
+                        MonitorPosition(
+                            strategy=strategy_name,
+                            account=account,
+                            vt_symbol=vt_symbol,
+                            direction="SHORT",
+                            volume=short_pos,
+                            avg_price=round(short_avg, 2),
+                            pnl=round(
+                                self._calc_position_pnl(
+                                    vt_symbol, "short", short_pos, short_avg
+                                ),
+                                2,
+                            ),
+                            trading_day=td,
+                            snapshot_time=now,
+                        )
+                    )
+            elif strategy.pos != 0:
+                direction = "long" if strategy.pos > 0 else "short"
+                monitor.write(
+                    MonitorPosition(
+                        strategy=strategy_name,
+                        account=account,
+                        vt_symbol=vt_symbol,
+                        direction=direction.upper(),
+                        volume=abs(strategy.pos),
+                        avg_price=round(avg_cost, 2),
+                        pnl=round(
+                            self._calc_position_pnl(
+                                vt_symbol, direction, abs(strategy.pos), avg_cost
+                            ),
+                            2,
+                        ),
+                        trading_day=td,
+                        snapshot_time=now,
+                    )
+                )
 
     # ----------------------------------------------------------------------
     # 主力合约获取（新浪）
     # ----------------------------------------------------------------------
-    def _fetch_main_contract(self, variety: str, retry: int = 3) -> Optional[str]:
+    def _fetch_main_contract(self, variety: str, retry: int = 3) -> str | None:
         """获取主力合约（进程级缓存，子进程退出自动清空）"""
         cached = self._main_contract_cache.get(variety)
         if cached:
@@ -235,7 +333,7 @@ class RolloverCtaEngine(CtaEngine):
                 url = f"https://hq.sinajs.cn/list={query}"
                 headers = {
                     "Referer": "https://finance.sina.com.cn",
-                    "User-Agent": "Mozilla/5.0"
+                    "User-Agent": "Mozilla/5.0",
                 }
                 resp = requests.get(url, headers=headers, timeout=10)
                 resp.encoding = "gbk"
@@ -292,7 +390,9 @@ class RolloverCtaEngine(CtaEngine):
                 f"  策略: {strategy_name}\n"
                 f"  旧合约: {old_vt_symbol}（保持不变）"
             )
-            self.write_log(f"换月失败：找不到新合约 {new_vt_symbol}，跳过换月", strategy)
+            self.write_log(
+                f"换月失败：找不到新合约 {new_vt_symbol}，跳过换月", strategy
+            )
             return False
 
         # 所有检查通过，执行换月
@@ -331,7 +431,10 @@ class RolloverCtaEngine(CtaEngine):
             self.start_strategy(strategy_name)
 
         # 发送换月成功日志
-        self.write_log(f"策略 [{strategy_name}] 已自动换月：{old_vt_symbol} -> {new_vt_symbol}", strategy)
+        self.write_log(
+            f"策略 [{strategy_name}] 已自动换月：{old_vt_symbol} -> {new_vt_symbol}",
+            strategy,
+        )
         return True
 
     def _has_position(self, strategy: CtaTemplate) -> bool:
@@ -347,7 +450,7 @@ class RolloverCtaEngine(CtaEngine):
 
         try:
             symbol, exchange = strategy.vt_symbol.split(".")
-            variety = ''.join(c for c in symbol if not c.isdigit())
+            variety = "".join(c for c in symbol if not c.isdigit())
             if not variety:
                 return
         except Exception:
@@ -362,7 +465,9 @@ class RolloverCtaEngine(CtaEngine):
         if new_vt_symbol == normalize_vt_symbol(strategy.vt_symbol):
             return
 
-        self.write_log(f"策略 [{strategy.strategy_name}] 检测到主力合约变化：{strategy.vt_symbol} -> {new_vt_symbol}")
+        self.write_log(
+            f"策略 [{strategy.strategy_name}] 检测到主力合约变化：{strategy.vt_symbol} -> {new_vt_symbol}"
+        )
 
         if not self._has_position(strategy):
             old_vt_symbol = strategy.vt_symbol
@@ -388,6 +493,25 @@ class RolloverCtaEngine(CtaEngine):
     def _on_account_event(self, event: Event) -> None:
         """账户事件 → 连接心跳（收到 account 说明 CTP 还在线）"""
         self.last_activity_time = time.time()
+        data = event.data
+        self._accountid = data.accountid
+        self._last_balance = data.balance
+        self._last_available = getattr(data, "available", data.balance - data.frozen)
+        self._last_frozen = data.frozen
+        monitor = getattr(self, "monitor", None)
+        if monitor:
+            monitor.write(
+                MonitorAccount(
+                    account=getattr(self, "account", "real"),
+                    accountid=data.accountid,
+                    balance=data.balance,
+                    available=self._last_available,
+                    frozen=data.frozen,
+                    margin=0.0,  # 保证金由 3s 快照从持仓计算
+                    pnl=0.0,  # 盈亏由 3s 快照从持仓计算
+                    snapshot_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                )
+            )
         if self.disconnect_alerted:
             self.disconnect_alerted = False
             self.notify.send_text(
@@ -395,8 +519,124 @@ class RolloverCtaEngine(CtaEngine):
             )
             self.write_log("CTP 连接已恢复")
 
+    def process_tick_event(self, event: Event) -> None:
+        """重写：缓存最新价（3s 快照的浮动盈亏计算用）"""
+        super().process_tick_event(event)
+        tick = event.data
+        if tick.last_price:
+            self.last_prices[normalize_vt_symbol(tick.vt_symbol)] = tick.last_price
+
+    def _snapshot_realtime(self) -> None:
+        """每 3s 快照：账户（含保证金/浮动盈亏，从持仓 + 最新价计算）"""
+        monitor = getattr(self, "monitor", None)
+        if not monitor:
+            return
+        account = getattr(self, "account", "real")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        total_margin = 0.0
+        total_pnl = 0.0
+        intraday = time.time() - self._last_intraday_time >= 900
+        if intraday:
+            self._last_intraday_time = time.time()
+        for name, strategy in self.strategies.items():
+            last = self.last_prices.get(strategy.vt_symbol)
+            contract = self.main_engine.get_contract(strategy.vt_symbol)
+            size = contract.size if contract else 0
+            avg_price = self._lots_avg(self.strategy_lots.get(name))
+            pnl = 0.0
+            if strategy.pos and last is not None and avg_price and size:
+                pnl = round((last - avg_price) * strategy.pos * size, 2)
+                total_pnl += pnl
+                total_margin += abs(strategy.pos) * avg_price * size * 0.08
+            monitor.write(
+                MonitorStrategyStatus(
+                    strategy=name,
+                    account=account,
+                    symbol=strategy.vt_symbol,
+                    status="running" if strategy.trading else "stopped",
+                    pos=strategy.pos,
+                    long_pos=getattr(strategy, "long_pos", 0) or 0,
+                    short_pos=getattr(strategy, "short_pos", 0) or 0,
+                    pnl=pnl,
+                    parameters={p: getattr(strategy, p) for p in strategy.parameters},
+                    variables={
+                        v: getattr(strategy, v) for v in strategy.variables if hasattr(strategy, v)
+                    },
+                    update_time=now,
+                )
+            )
+            if intraday:
+                realized = self.strategy_cumulative_pl.get(name, 0.0)
+                monitor.write(
+                    MonitorStrategyIntraday(
+                        strategy=name,
+                        account=account,
+                        symbol=strategy.vt_symbol,
+                        realized_pl=round(realized, 2),
+                        floating_pl=round(pnl, 2),
+                        equity=round(realized + pnl, 2),
+                        snapshot_time=now,
+                    )
+                )
+
+        monitor.write(
+            MonitorAccount(
+                account=account,
+                accountid=self._accountid,
+                balance=self._last_balance,
+                available=self._last_available,
+                frozen=self._last_frozen,
+                margin=round(total_margin, 2),
+                pnl=round(total_pnl, 2),
+                snapshot_time=now,
+            )
+        )
+        self._write_account_positions()
+
+    def _write_account_positions(self) -> None:
+        """Write CTP account-level real positions + intraday P&L (separate
+        from strategy positions in the positions table)."""
+        monitor = getattr(self, "monitor", None)
+        if not monitor:
+            return
+        account = getattr(self, "account", "real")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        floating_pl = 0.0
+        for pos in self.main_engine.get_all_positions():
+            floating_pl += pos.pnl
+            if not pos.volume:
+                continue
+            monitor.write(
+                MonitorAccountPosition(
+                    account=account,
+                    accountid=self._accountid,
+                    vt_symbol=pos.vt_symbol,
+                    direction=pos.direction.value,
+                    volume=pos.volume,
+                    price=round(pos.price, 2),
+                    pnl=round(pos.pnl, 2),
+                    snapshot_time=now,
+                )
+            )
+        today = trading_day(datetime.now())
+        if self._today_trading_day != today:
+            self._today_trading_day = today
+            self._today_realized_pl = 0.0
+        monitor.write(
+            MonitorAccountDailyPnl(
+                account=account,
+                accountid=self._accountid,
+                trading_day=today,
+                realized_pl=round(self._today_realized_pl, 2),
+                floating_pl=round(floating_pl, 2),
+                balance=self._last_balance,
+                snapshot_time=now,
+            )
+        )
+
     # ----------------------------------------------------------------------
-    # 订单 / 成交事件（通知 + CSV）
+    # 订单 / 成交事件（通知 + 监控写库）
     # ----------------------------------------------------------------------
     def process_order_event(self, event: Event) -> None:
         super().process_order_event(event)
@@ -415,22 +655,40 @@ class RolloverCtaEngine(CtaEngine):
         # ── 每日订单状态统计（"总计"按唯一订单号去重，见 get_daily_order_stats）──
         status_key: str = order.status.value
         self._daily_order_ids.add(order.vt_orderid)
-        self._daily_order_counts[status_key] = self._daily_order_counts.get(status_key, 0) + 1
+        self._daily_order_counts[status_key] = (
+            self._daily_order_counts.get(status_key, 0) + 1
+        )
 
         # ── 记录发单时间（首次出现时） ──
         if order.vt_orderid not in self.order_submit_times:
             self.order_submit_times[order.vt_orderid] = datetime.now()
 
-        # ── CSV 写入 ──
-        if strategy_name not in self.strategy_csv_files:
-            self._init_csv_files(strategy_name)
-
-        csv_file = self.strategy_csv_files[strategy_name]["order"]
-        self._append_csv(f"订单 {strategy_name}", csv_file, [
-            str(order.datetime), order.symbol, order.exchange.value,
-            order.orderid, order.direction.value, order.offset.value,
-            order.price, order.volume, order.traded, order.status.value,
-        ])
+        # ── 监控写库：订单 ──
+        monitor = getattr(self, "monitor", None)
+        if monitor:
+            submit = self.order_submit_times.get(order.vt_orderid)
+            delay_ms = (
+                round((datetime.now() - submit).total_seconds() * 1000, 0)
+                if submit
+                else 0.0
+            )
+            monitor.write(
+                MonitorOrder(
+                    vt_orderid=order.vt_orderid,
+                    strategy=strategy_name,
+                    account=getattr(self, "account", "real"),
+                    symbol=order.symbol,
+                    exchange=order.exchange.value,
+                    direction=order.direction.name,
+                    offset=order.offset.name,
+                    price=order.price,
+                    volume=order.volume,
+                    traded=order.traded,
+                    status=order.status.name,
+                    submit_time=str(order.datetime),
+                    delay_ms=delay_ms,
+                )
+            )
 
         # ── 通知：rejected + 平仓未成交推手机 ──
         if order.status == Status.REJECTED:
@@ -442,11 +700,18 @@ class RolloverCtaEngine(CtaEngine):
                 f"  价格: {order.price:.2f}  数量: {order.volume}\n"
                 f"  时间: {order.datetime}"
             )
-            self.write_log(f"订单被拒 {strategy_name} {order.vt_symbol} price={order.price}")
+            self.write_log(
+                f"订单被拒 {strategy_name} {order.vt_symbol} price={order.price}"
+            )
         elif order.status == Status.NOTTRADED:
             if order.vt_orderid not in self._notified_nottraded:
                 self._notified_nottraded.add(order.vt_orderid)
-                label = "平仓单" if order.offset in (Offset.CLOSE, Offset.CLOSETODAY, Offset.CLOSEYESTERDAY) else "开仓单"
+                label = (
+                    "平仓单"
+                    if order.offset
+                    in (Offset.CLOSE, Offset.CLOSETODAY, Offset.CLOSEYESTERDAY)
+                    else "开仓单"
+                )
                 notify_text = (
                     f"⚠️ {label}未成交\n"
                     f"  策略: {strategy_name}\n"
@@ -460,7 +725,9 @@ class RolloverCtaEngine(CtaEngine):
                     if lots:
                         avg_price = lots[0][1]  # FIFO 队头成本
                         direction_mult = -1 if order.direction == Direction.LONG else 1
-                        est_pl = (order.price - avg_price) * order.volume * direction_mult
+                        est_pl = (
+                            (order.price - avg_price) * order.volume * direction_mult
+                        )
                         notify_text += f"\n  预估盈亏: {est_pl:+.2f} 点"
                 self.notify.send_text(notify_text)
         elif order.status == Status.CANCELLED:
@@ -471,7 +738,9 @@ class RolloverCtaEngine(CtaEngine):
                 f"  方向: {order.direction.value} {order.offset.value}\n"
                 f"  价格: {order.price:.2f}  数量: {order.volume}"
             )
-            self.write_log(f"订单撤销 {strategy_name} {order.vt_symbol} price={order.price}")
+            self.write_log(
+                f"订单撤销 {strategy_name} {order.vt_symbol} price={order.price}"
+            )
         else:
             self.write_log(
                 f"订单更新 {strategy_name} {order.symbol} "
@@ -527,25 +796,72 @@ class RolloverCtaEngine(CtaEngine):
                     td = td.astimezone().replace(tzinfo=None)  # → local naive
                 delay_ms = (td - submit_time).total_seconds() * 1000
 
-        # ── 持仓均价快照（成交前，写 CSV 用；开仓时无持仓记 0） ──
-        avg_price_before = self._lots_avg(self.strategy_lots.get(strategy_name))
-
         # ── P&L 追踪（批次队列按交易所规则匹配；锁仓策略多空分记跳过由策略自算） ──
         pl = 0.0
         is_locked = hasattr(strategy, "long_pos") and hasattr(strategy, "short_pos")
         if not is_locked:
             if trade.offset == Offset.OPEN:
                 lots = self.strategy_lots.setdefault(strategy_name, [])
-                lots.append([trade.volume, trade.price, trading_day(trade.datetime)])
+                lots.append(
+                    [
+                        trade.volume,
+                        trade.price,
+                        trading_day(trade.datetime),
+                        trade.datetime,
+                    ]
+                )
             else:
                 lots = self.strategy_lots.get(strategy_name)
                 if lots:
                     direction_mult = 1 if trade.direction == Direction.SHORT else -1
                     today = trading_day(trade.datetime)
-                    pl = settle_close(lots, trade.exchange, trade.offset,
-                                      trade.volume, today, trade.price, direction_mult)
-                    self.strategy_cumulative_pl[strategy_name] = \
+                    pl, details = settle_close(
+                        lots,
+                        trade.exchange,
+                        trade.offset,
+                        trade.volume,
+                        today,
+                        trade.price,
+                        direction_mult,
+                        with_details=True,
+                    )
+                    self.strategy_cumulative_pl[strategy_name] = (
                         self.strategy_cumulative_pl.get(strategy_name, 0) + pl
+                    )
+                    self._today_realized_pl += pl
+
+                    # ── 监控写库：平仓配对 trade_rounds ──
+                    monitor = getattr(self, "monitor", None)
+                    if monitor and details:
+                        direction_str = "LONG" if direction_mult == 1 else "SHORT"
+                        close_dt = trade.datetime
+                        if close_dt is not None and close_dt.tzinfo is not None:
+                            close_dt = close_dt.astimezone().replace(tzinfo=None)
+                        account = getattr(self, "account", "real")
+                        for vol, entry_price, _day, pair_pl, open_dt in details:
+                            holding = 0.0
+                            if open_dt is not None and close_dt is not None:
+                                od = open_dt
+                                if od.tzinfo is not None:
+                                    od = od.astimezone().replace(tzinfo=None)
+                                holding = round((close_dt - od).total_seconds(), 0)
+                            monitor.write(
+                                MonitorTradeRound(
+                                    strategy=strategy_name,
+                                    symbol=trade.symbol,
+                                    exchange=trade.exchange.value,
+                                    account=account,
+                                    direction=direction_str,
+                                    entry_price=round(entry_price, 2),
+                                    exit_price=round(trade.price, 2),
+                                    volume=vol,
+                                    pnl=round(pair_pl, 2),
+                                    holding_seconds=holding,
+                                    open_time=str(_day),
+                                    close_time=str(close_dt) if close_dt else "",
+                                    trading_day=today,
+                                )
+                            )
 
         # ── 本地日志 ──
         if slippage != 0 or delay_ms > 0:
@@ -601,35 +917,27 @@ class RolloverCtaEngine(CtaEngine):
 
         self.sync_strategy_data(strategy)
 
-        # ── 成交 CSV ──
-        if strategy_name not in self.strategy_csv_files:
-            self._init_csv_files(strategy_name)
+        # ── 监控写库：成交 ──
+        monitor = getattr(self, "monitor", None)
+        if monitor:
+            monitor.write(
+                MonitorTrade(
+                    vt_tradeid=trade.vt_tradeid,
+                    vt_orderid=trade.vt_orderid,
+                    strategy=strategy_name,
+                    account=getattr(self, "account", "real"),
+                    symbol=trade.symbol,
+                    exchange=trade.exchange.value,
+                    price=trade.price,
+                    volume=trade.volume,
+                    slippage=round(slippage, 2),
+                    delay_ms=round(delay_ms, 0),
+                    trade_time=str(trade.datetime),
+                )
+            )
 
-        trade_dict = {
-            "datetime": str(trade.datetime),
-            "symbol": trade.symbol,
-            "exchange": trade.exchange.value,
-            "orderid": trade.orderid,
-            "tradeid": trade.tradeid,
-            "direction": trade.direction.value,
-            "offset": trade.offset.value,
-            "price": trade.price,
-            "volume": trade.volume,
-            "slippage": round(slippage, 2),
-            "delay_ms": round(delay_ms, 0),
-            "avg_price": round(avg_price_before or trade.price, 2),
-        }
-
-        csv_file = self.strategy_csv_files[strategy_name]["trade"]
-        self._append_csv(f"成交 {strategy_name}", csv_file, [
-            trade_dict["datetime"], trade_dict["symbol"], trade_dict["exchange"],
-            trade_dict["orderid"], trade_dict["tradeid"], trade_dict["direction"],
-            trade_dict["offset"], trade_dict["price"], trade_dict["volume"],
-            trade_dict["slippage"], trade_dict["delay_ms"], trade_dict["avg_price"],
-        ])
-
-        # ── 持仓 CSV（每次成交后的持仓快照）──
-        self._append_position_csv(strategy, strategy_name, trade_dict)
+        # ── 持仓快照（每次成交后写库）──
+        self._write_position_snapshot(strategy, strategy_name)
 
         # 订单全部成交后清理缓存，防内存泄漏（撤单/拒单在 process_order_event 清理）
         if order is not None and order.status == Status.ALLTRADED:
@@ -648,12 +956,36 @@ class RolloverCtaEngine(CtaEngine):
             self.notify.send_text(
                 f"🔴 CTP 连接异常！已 {int(current_time - self.last_activity_time)} 秒无数据"
             )
-            self.write_log(f"CTP 连接异常告警：{int(current_time - self.last_activity_time)}s 无活动")
+            self.write_log(
+                f"CTP 连接异常告警：{int(current_time - self.last_activity_time)}s 无活动"
+            )
+
+        # ── 3s 高频快照：账户 + 持仓浮动盈亏 ──
+        if current_time - self._last_snapshot_time >= 3:
+            self._last_snapshot_time = current_time
+            self._snapshot_realtime()
 
         # ── 策略监控 ──
         if current_time - self.last_monitor_time < self.monitor_interval:
             return
         self.last_monitor_time = current_time
+
+        # ── 监控写库：系统指标 + K线/合约（策略状态已移至 3s 快照）──
+        monitor = getattr(self, "monitor", None)
+        if monitor:
+            for name, s in self.strategies.items():
+                self._attach_kline_writer(s)
+                self._write_contract(s.vt_symbol)
+            uptime_seconds = int(time.time() - psutil.boot_time())
+            monitor.write(
+                MonitorSystemMetric(
+                    ts=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    cpu=psutil.cpu_percent(interval=1),
+                    mem=psutil.virtual_memory().percent,
+                    disk=psutil.disk_usage("/").percent,
+                    uptime=f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m",
+                )
+            )
 
         messages = []
         for strategy_name, strategy in self.strategies.items():
@@ -661,7 +993,9 @@ class RolloverCtaEngine(CtaEngine):
                 continue
 
             # 优先使用策略自定义的监控消息
-            if hasattr(strategy, "get_monitor_message") and callable(strategy.get_monitor_message):
+            if hasattr(strategy, "get_monitor_message") and callable(
+                strategy.get_monitor_message
+            ):
                 try:
                     custom_msg = strategy.get_monitor_message()
                     if custom_msg:
@@ -692,7 +1026,9 @@ class RolloverCtaEngine(CtaEngine):
                 lines.append(f"  缓存: {am.count}/{am.size}  |  ready={am.inited}")
 
             # SaveStrategy 无 ArrayManager，显示 bar_count
-            if hasattr(strategy, "bar_count") and not (hasattr(strategy, "am") and strategy.am is not None):
+            if hasattr(strategy, "bar_count") and not (
+                hasattr(strategy, "am") and strategy.am is not None
+            ):
                 lines.append(f"  已保存: {strategy.bar_count} 条Bar")
 
             # 策略关键变量（过滤引擎状态字段）
@@ -777,15 +1113,87 @@ class RolloverCtaEngine(CtaEngine):
         if not lines:
             text = f"📊 当日盈亏汇总\n{sep}\n  今日无交易"
         else:
-            text = f"📊 当日盈亏汇总\n{sep}\n" + "\n\n".join(lines) + f"\n{sep}\n  合计已实现: {total:+.2f} 元"
+            text = (
+                f"📊 当日盈亏汇总\n{sep}\n"
+                + "\n\n".join(lines)
+                + f"\n{sep}\n  合计已实现: {total:+.2f} 元"
+            )
         self.notify.send_text(text)
 
     def reset_daily_pl(self) -> None:
         """每日收盘归零累计盈亏：次日从 0 起统计当日盈亏（隔夜持仓按逐日盯市已结算，不影响）"""
+        monitor = getattr(self, "monitor", None)
+        if monitor:
+            account = getattr(self, "account", "real")
+            for name, strategy in self.strategies.items():
+                is_locked = hasattr(strategy, "long_pos") and hasattr(
+                    strategy, "short_pos"
+                )
+                if is_locked:
+                    realized = getattr(strategy, "realized_pl", 0) or 0
+                else:
+                    realized = self.strategy_cumulative_pl.get(name, 0) or 0
+                monitor.write(
+                    MonitorDailyPnl(
+                        trading_day=trading_day(datetime.now()),
+                        strategy=name,
+                        account=account,
+                        realized_pl=realized,
+                        cumulative_pl=self.strategy_cumulative_pl.get(name, 0) or 0,
+                    )
+                )
         for name, strategy in self.strategies.items():
             if hasattr(strategy, "realized_pl"):
                 strategy.realized_pl = 0.0
             self.strategy_cumulative_pl[name] = 0.0
+
+    def _write_contract(self, vt_symbol: str) -> None:
+        """Upsert CTP contract specs (name/product/size/pricetick) into the
+        monitor DB so the frontend shows real exchange data instead of a
+        hardcoded table."""
+        monitor = getattr(self, "monitor", None)
+        if not monitor:
+            return
+        contract = self.main_engine.get_contract(vt_symbol)
+        if not contract:
+            return
+        variety = "".join(ch for ch in vt_symbol.split(".")[0] if ch.isalpha())
+        monitor.write_upsert(
+            MonitorContract(
+                symbol=vt_symbol,
+                exchange=contract.exchange.value,
+                name=contract.name or "",
+                product=variety,
+                size=contract.size or 0,
+                pricetick=contract.pricetick or 0,
+                update_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        )
+
+    def _write_kline(self, bar) -> None:
+        """BarGenerator 合成 1min bar 时写 K线"""
+        monitor = getattr(self, "monitor", None)
+        if monitor:
+            monitor.write(
+                MonitorKline(
+                    symbol=bar.vt_symbol,
+                    exchange=bar.exchange.value,
+                    account=getattr(self, "account", "real"),
+                    interval="1m",
+                    datetime=str(bar.datetime),
+                    open=bar.open_price,
+                    high=bar.high_price,
+                    low=bar.low_price,
+                    close=bar.close_price,
+                    volume=bar.volume,
+                )
+            )
+
+    def _attach_kline_writer(self, strategy: CtaTemplate) -> None:
+        """给策略的 BarGenerator 挂上 K线写库回调（幂等）"""
+        bg = getattr(strategy, "bg", None)
+        if bg is not None and hasattr(bg, "kline_writer") and bg.kline_writer is None:
+            bg.kline_writer = self._write_kline
 
     # ----------------------------------------------------------------------
     # _init_strategy — 初始化前检查换月（仅记录结果，不发通知）
@@ -797,7 +1205,12 @@ class RolloverCtaEngine(CtaEngine):
         data.pop("trading")
         lots = self.strategy_lots.get(strategy.strategy_name)
         if lots:
-            data["lots"] = [list(b) for b in lots]
+            data["lots"] = [
+                [b[0], b[1], b[2], b[3].isoformat() if isinstance(b[3], datetime) else b[3]]
+                if len(b) > 3
+                else list(b)
+                for b in lots
+            ]
         else:
             data.pop("lots", None)
         cum_pl = self.strategy_cumulative_pl.get(strategy.strategy_name)
@@ -814,7 +1227,9 @@ class RolloverCtaEngine(CtaEngine):
         """添加策略前统一合约代码大小写与年份位数（配置写错也能订阅成功）"""
         fixed = normalize_vt_symbol(vt_symbol)
         if fixed != vt_symbol:
-            self.write_log(f"策略 [{strategy_name}] 合约代码已规范化：{vt_symbol} -> {fixed}")
+            self.write_log(
+                f"策略 [{strategy_name}] 合约代码已规范化：{vt_symbol} -> {fixed}"
+            )
         super().add_strategy(class_name, strategy_name, fixed, setting)
 
     def _init_strategy(self, strategy_name: str) -> None:
@@ -841,7 +1256,13 @@ class RolloverCtaEngine(CtaEngine):
         data = self.strategy_data.get(strategy_name, {})
         lots = data.get("lots")
         if lots:
-            self.strategy_lots[strategy_name] = [list(b) for b in lots]
+            restored = []
+            for b in lots:
+                b = list(b)
+                if len(b) > 3 and isinstance(b[3], str):
+                    b[3] = datetime.fromisoformat(b[3])
+                restored.append(b)
+            self.strategy_lots[strategy_name] = restored
         cum_pl = data.get("cumulative_pl")
         if cum_pl:
             self.strategy_cumulative_pl[strategy_name] = cum_pl
@@ -853,7 +1274,7 @@ class RolloverCtaEngine(CtaEngine):
 
         try:
             symbol, exchange = strategy.vt_symbol.split(".")
-            variety = ''.join(c for c in symbol if not c.isdigit())
+            variety = "".join(c for c in symbol if not c.isdigit())
             if not variety:
                 self._rollover_init_results[name] = "no_change"
                 return
@@ -872,12 +1293,16 @@ class RolloverCtaEngine(CtaEngine):
             self._rollover_init_results[name] = "no_change"
             return
 
-        self.write_log(f"策略 [{name}] 检测到主力合约变化：{strategy.vt_symbol} -> {new_vt_symbol}")
+        self.write_log(
+            f"策略 [{name}] 检测到主力合约变化：{strategy.vt_symbol} -> {new_vt_symbol}"
+        )
 
         if not self._has_position(strategy):
             old_vt_symbol = strategy.vt_symbol
             if self._execute_rollover(strategy, new_vt_symbol):
-                self.write_log(f"策略 [{name}] 初始化时已自动换月：{old_vt_symbol} -> {new_vt_symbol}")
+                self.write_log(
+                    f"策略 [{name}] 初始化时已自动换月：{old_vt_symbol} -> {new_vt_symbol}"
+                )
                 self._rollover_init_results[name] = "rolled"
             else:
                 self._rollover_init_results[name] = "failed"
@@ -906,5 +1331,3 @@ class RolloverCtaEngine(CtaEngine):
         result = dict(self._daily_order_counts)
         result["总计"] = len(self._daily_order_ids)
         return result
-
-

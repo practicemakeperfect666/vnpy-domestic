@@ -4,14 +4,14 @@
 配置方法：在 vt_setting.json 中设置 "datafeed.name": "akshare"
 """
 
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable
-import pandas as pd
-import akshare as ak
 
-from vnpy.trader.object import HistoryRequest, BarData, Interval
+import akshare as ak
+import pandas as pd
 from vnpy.trader.constant import Exchange
 from vnpy.trader.datafeed import BaseDatafeed
+from vnpy.trader.object import BarData, HistoryRequest, Interval
 
 
 class Datafeed(BaseDatafeed):
@@ -47,8 +47,8 @@ class Datafeed(BaseDatafeed):
 
         # CZCE: 1-digit year → 2-digit for Sina (MA610 → MA2610)
         if req.exchange == Exchange.CZCE:
-            variety = ''.join(c for c in symbol if not c.isdigit())
-            digits = symbol[len(variety):]
+            variety = "".join(c for c in symbol if not c.isdigit())
+            digits = symbol[len(variety) :]
             if len(digits) == 3:
                 symbol = variety + str(datetime.now().year)[2] + digits
 

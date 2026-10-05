@@ -1,9 +1,11 @@
 # vnpy-domestic — 运行时数据/配置目录
 .vntrader/*
+!.vntrader/*.example
+!.vntrader/vt_setting.json
 
-# 策略代码（实盘专属，不提交）
-strategies/multi_layer.py
-strategies/multi_layer.md
+# 策略代码（白名单：只提交双均线示例，其余实盘专属不提交）
+strategies/*
+!strategies/dual_ma.py
 
 
 # Python

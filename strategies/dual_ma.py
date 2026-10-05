@@ -1,15 +1,14 @@
 """双均线策略——基于 MyBarGenerator"""
 
 from vnpy_ctastrategy import (
+    ArrayManager,
+    BarData,
     CtaTemplate,
+    OrderData,
     StopOrder,
     TickData,
-    BarData,
     TradeData,
-    OrderData,
 )
-from vnpy_ctastrategy import ArrayManager
-
 from vnpy_domestic import MyBarGenerator
 
 

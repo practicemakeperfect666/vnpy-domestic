@@ -1,17 +1,16 @@
 # notification_manager.py
-import time
-import hmac
-import hashlib
 import base64
-import urllib.parse
+import hashlib
+import hmac
 import platform
-from typing import Optional
+import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
-import requests
-import psutil
-import yaml
 
+import psutil
+import requests
+import yaml
 from vnpy.trader.constant import Direction, Status
 
 
@@ -20,35 +19,35 @@ class NotificationManager:
     统一通知管理器
     支持钉钉和飞书，可自由切换
     """
-    
+
     # ============================================================
     # 配置区域 - 请在此修改你的通知配置
     # 推荐：在 .vntrader/secrets.yaml 中填写，启动时自动加载
     # ============================================================
-    
+
     # 通知类型: "dingtalk", "feishu", "both"
     NOTIFY_TYPE = "both"
-    
+
     # 钉钉配置（默认占位值，会被 secrets.yaml 覆盖）
     DINGTALK_WEBHOOK = ""
     DINGTALK_SECRET = ""
-    
+
     # 飞书配置（默认占位值，会被 secrets.yaml 覆盖）
     FEISHU_WEBHOOK = ""
-    
+
     # ============================================================
-    
+
     def __init__(
         self,
-        notify_type: Optional[str] = None,
-        dingtalk_webhook: Optional[str] = None,
-        dingtalk_secret: Optional[str] = None,
-        feishu_webhook: Optional[str] = None,
-        config_path: Optional[Path] = None,
+        notify_type: str | None = None,
+        dingtalk_webhook: str | None = None,
+        dingtalk_secret: str | None = None,
+        feishu_webhook: str | None = None,
+        config_path: Path | None = None,
     ):
         """
         初始化通知管理器
-        
+
         Parameters
         ----------
         notify_type : 通知类型 ("dingtalk", "feishu", "both")，不指定则从 secrets.yaml 或类配置读取
@@ -64,7 +63,9 @@ class NotificationManager:
         else:
             yaml_paths = [
                 Path.cwd() / ".vntrader" / "secrets.yaml",
-                Path(__file__).resolve().parent.parent.parent / ".vntrader" / "secrets.yaml",
+                Path(__file__).resolve().parent.parent.parent
+                / ".vntrader"
+                / "secrets.yaml",
                 Path.home() / ".vntrader" / "secrets.yaml",
             ]
         for p in yaml_paths:
@@ -76,24 +77,36 @@ class NotificationManager:
                     pass
                 break
 
-        self.notify_type = notify_type or secrets.get("notify_type", "") or self.NOTIFY_TYPE
-        self.dingtalk_webhook = dingtalk_webhook or secrets.get("dingtalk_webhook", "") or self.DINGTALK_WEBHOOK
-        self.dingtalk_secret = dingtalk_secret or secrets.get("dingtalk_secret", "") or self.DINGTALK_SECRET
-        self.feishu_webhook = feishu_webhook or secrets.get("feishu_webhook", "") or self.FEISHU_WEBHOOK
-        
+        self.notify_type = (
+            notify_type or secrets.get("notify_type", "") or self.NOTIFY_TYPE
+        )
+        self.dingtalk_webhook = (
+            dingtalk_webhook
+            or secrets.get("dingtalk_webhook", "")
+            or self.DINGTALK_WEBHOOK
+        )
+        self.dingtalk_secret = (
+            dingtalk_secret
+            or secrets.get("dingtalk_secret", "")
+            or self.DINGTALK_SECRET
+        )
+        self.feishu_webhook = (
+            feishu_webhook or secrets.get("feishu_webhook", "") or self.FEISHU_WEBHOOK
+        )
+
         self.log_callback = None
 
     def set_log_callback(self, callback):
         """设置日志回调函数"""
         self.log_callback = callback
-    
+
     def _log(self, message: str):
         """输出日志"""
         if self.log_callback:
             self.log_callback(message)
         else:
             print(f"[NotificationManager] {message}")
-    
+
     # ============================================================
     # 钉钉相关方法
     # ============================================================
@@ -102,23 +115,22 @@ class NotificationManager:
         timestamp = str(round(time.time() * 1000))
         secret_enc = self.dingtalk_secret.encode("utf-8")
         string_to_sign = f"{timestamp}\n{self.dingtalk_secret}"
-        hmac_code = hmac.new(secret_enc, string_to_sign.encode("utf-8"), hashlib.sha256).digest()
+        hmac_code = hmac.new(
+            secret_enc, string_to_sign.encode("utf-8"), hashlib.sha256
+        ).digest()
         sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
         return timestamp, sign
-    
+
     def _send_dingtalk_text(self, text: str) -> bool:
         """发送钉钉文本消息"""
         if not self.dingtalk_webhook:
             self._log("钉钉 webhook 未配置")
             return False
-        
+
         try:
             timestamp, sign = self._get_dingtalk_sign()
             url = f"{self.dingtalk_webhook}&timestamp={timestamp}&sign={sign}"
-            data = {
-                "msgtype": "text",
-                "text": {"content": text}
-            }
+            data = {"msgtype": "text", "text": {"content": text}}
             resp = requests.post(url, json=data, timeout=5)
             if resp.status_code == 200 and resp.json().get("errcode") == 0:
                 self._log("钉钉消息发送成功")
@@ -129,7 +141,7 @@ class NotificationManager:
         except Exception as e:
             self._log(f"钉钉发送异常：{e}")
             return False
-    
+
     # ============================================================
     # 飞书相关方法
     # ============================================================
@@ -138,16 +150,13 @@ class NotificationManager:
         if not self.feishu_webhook:
             self._log("飞书 webhook 未配置")
             return False
-        
+
         try:
-            data = {
-                "msg_type": "text",
-                "content": {"text": text}
-            }
-            
+            data = {"msg_type": "text", "content": {"text": text}}
+
             resp = requests.post(self.feishu_webhook, json=data, timeout=5)
             result = resp.json()
-            
+
             if result.get("code") == 0:
                 self._log("飞书消息发送成功")
                 return True
@@ -157,25 +166,25 @@ class NotificationManager:
         except Exception as e:
             self._log(f"飞书发送异常：{e}")
             return False
-    
+
     # ============================================================
     # 统一发送接口
     # ============================================================
-    def send_text(self, text: str, force_type: Optional[str] = None) -> bool:
+    def send_text(self, text: str, force_type: str | None = None) -> bool:
         """
         发送文本消息
-        
+
         Parameters
         ----------
         text : 消息内容（由调用方生成）
         force_type : 强制使用的通知类型（"dingtalk"/"feishu"），不指定则使用默认配置
-        
+
         Returns
         -------
         bool : 是否发送成功
         """
         notify_type = force_type or self.notify_type
-        
+
         if notify_type == "dingtalk":
             return self._send_dingtalk_text(text)
         elif notify_type == "feishu":
@@ -188,26 +197,28 @@ class NotificationManager:
         else:
             self._log(f"未知的通知类型: {notify_type}")
             return False
-    
+
     # ============================================================
     # 辅助方法：格式化各类消息
     # ============================================================
     def send_test_message(self) -> bool:
         """发送测试消息，用于验证配置是否正确"""
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         text = f"""📢 测试消息
 
 这是一条测试消息，用于验证通知配置是否正确。
 
 ⏰ 时间：{now}
-📱 钉钉：{'✅ 已配置' if self.dingtalk_webhook else '❌ 未配置'}
-📱 飞书：{'✅ 已配置' if self.feishu_webhook else '❌ 未配置'}
+📱 钉钉：{"✅ 已配置" if self.dingtalk_webhook else "❌ 未配置"}
+📱 飞书：{"✅ 已配置" if self.feishu_webhook else "❌ 未配置"}
 🔄 通知类型：{self.notify_type}
 
 ✅ 配置验证中，请确认能收到此消息。"""
         return self.send_text(text)
 
-    def send_status_summary(self, messages: list, total: int, idx: int, seq: int = 0) -> bool:
+    def send_status_summary(
+        self, messages: list, total: int, idx: int, seq: int = 0
+    ) -> bool:
         """发送策略状态汇总"""
         suffix = f" [{idx}/{total}]" if total > 1 else ""
         seq_tag = f" {seq}" if seq else ""
@@ -232,8 +243,10 @@ class NotificationManager:
 
         for p in real_positions:
             dir_str = "多" if p.direction == Direction.LONG else "空"
-            line = (f"  {p.vt_symbol:<14} {dir_str:<4} {p.volume:>4}  "
-                    f"{p.price:>8.2f}  {p.pnl:>10.2f}")
+            line = (
+                f"  {p.vt_symbol:<14} {dir_str:<4} {p.volume:>4}  "
+                f"{p.price:>8.2f}  {p.pnl:>10.2f}"
+            )
             lines.append(line)
 
         return "\n".join(lines)
@@ -255,7 +268,14 @@ class NotificationManager:
             # ── 订单状态统计 ──
             order_lines = ""
             if order_stats:
-                STATUS_KEYS = ["提交中", "未成交", "部分成交", "全部成交", "已撤销", "拒单"]
+                STATUS_KEYS = [
+                    "提交中",
+                    "未成交",
+                    "部分成交",
+                    "全部成交",
+                    "已撤销",
+                    "拒单",
+                ]
                 parts = []
                 for label in STATUS_KEYS:
                     cnt = order_stats.get(label, 0)
@@ -270,7 +290,7 @@ class NotificationManager:
                 mem = f"{psutil.virtual_memory().percent}%"
                 disk = f"{psutil.disk_usage('/').percent}%"
                 boot = datetime.fromtimestamp(psutil.boot_time())
-                uptime = str(datetime.now() - boot).split('.')[0]
+                uptime = str(datetime.now() - boot).split(".")[0]
             except Exception:
                 cpu = mem = disk = uptime = "N/A"
 
@@ -280,15 +300,18 @@ class NotificationManager:
             if active_orders:
                 DIR_MAP = {Direction.LONG: "多", Direction.SHORT: "空"}
                 STATUS_MAP = {
-                    Status.SUBMITTING: "提交中", Status.NOTTRADED: "未成交",
+                    Status.SUBMITTING: "提交中",
+                    Status.NOTTRADED: "未成交",
                     Status.PARTTRADED: "部成",
                 }
                 lines = []
                 for o in active_orders:
-                    strat_name = o.reference.replace("CtaStrategy_", "") if o.reference else ""
+                    strat_name = (
+                        o.reference.replace("CtaStrategy_", "") if o.reference else ""
+                    )
                     dir_label = DIR_MAP.get(o.direction, "?")
                     status_label = STATUS_MAP.get(o.status, str(o.status))
-                    status_code = o.status.name   # SUBMITTING / NOTTRADED / PARTTRADED
+                    status_code = o.status.name  # SUBMITTING / NOTTRADED / PARTTRADED
                     lines.append(
                         f"    {strat_name} {o.symbol} {dir_label} @{o.price} "
                         f"{o.traded}/{o.volume}手 {status_label}({status_code})"
@@ -344,7 +367,7 @@ class NotificationManager:
         """发送启动通知"""
         message = f"""
 🚀 **CTA策略系统启动**
-⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+⏰ 时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 📊 状态: 系统初始化完成，策略已加载
 
 系统信息:
@@ -358,7 +381,7 @@ class NotificationManager:
         """发送关闭通知"""
         message = f"""
 🛑 **CTA策略系统关闭**
-⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+⏰ 时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 📊 状态: 系统正常退出
         """
         return self.send_text(message)
@@ -369,17 +392,17 @@ if __name__ == "__main__":
     print("=" * 50)
     print("通知管理器测试")
     print("=" * 50)
-    
+
     nm = NotificationManager()
-    
+
     print("\n发送测试消息...")
     success = nm.send_test_message()
-    
+
     if success:
         print("\n✅ 测试消息发送成功！请检查钉钉/飞书是否收到消息。")
     else:
         print("\n❌ 测试消息发送失败，请检查配置。")
-    
+
     print("\n当前配置:")
     print(f"  通知类型: {nm.notify_type}")
     print(f"  钉钉 Webhook: {nm.dingtalk_webhook[:50]}...")

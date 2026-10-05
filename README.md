@@ -2,7 +2,7 @@
   <br>
   <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python" alt="Python">
   <img src="https://img.shields.io/badge/vnpy-4.4.0-blue?style=flat-square" alt="vnpy">
-  <img src="https://img.shields.io/badge/version-0.1.2-brightgreen?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.2.0-brightgreen?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="License">
   <br><br>
 
@@ -14,29 +14,17 @@
 
 ---
 
-## v0.1.2 更新（2026-08-26）
+## v0.2.0 更新（2026-10）
 
-- **合约代码统一规范化**：新增 `normalize_vt_symbol`，按交易所统一 CTP InstrumentID 格式——SHFE/INE/DCE/GFEX 小写、CZCE/CFFEX 大写、CZCE 年份 1 位
-- **修复 SHFE/INE/GFEX 换月失败**：原逻辑只对 DCE 转小写，SHFE 主力拼成 `RB2610.SHFE` 导致 `get_contract` 找不到、换月被跳过
-- **配置入口容错**：`add_strategy` 自动修正配置里写错的合约代码（如 `RB2701.SHFE` → `rb2701.SHFE`），修正结果写回 setting 文件并记日志
-- **akshare 年份前缀**：CZCE 补年份不再硬编码 "2"，改按当前年份推导
+- **双账户 Web 监控**：实盘 CTP + simnow 模拟盘双账户同时跑，Web 面板合并看，飞书通知分群、控制只对实盘。拆分三模块两库——交易核心 vnpy-domestic + 后端独立包 web-backend + 前端独立项目 web-frontend
+- **MonitorWriter 写库层**：queue + 独立线程异步落库，交易主循环零阻塞；埋点只在 RolloverCtaEngine 现有方法末尾追加，不动核心交易逻辑；SQLite + WAL + busy_timeout 处理双进程并发写
+- **monitor.db 监控库（14 张表）**：orders / trades / positions / accounts / account_positions / account_daily_pnl / daily_pnl / strategy_status / strategy_intraday / logs / system_metrics / klines / trade_rounds / contracts，除 contracts 外全带 account 字段区分 real / simnow，时间统一北京时间字符串
+- **web-backend 后端**：FastAPI + SQLAlchemy 2.0 只读 monitor.db，18 个 REST 接口 + WebSocket `/ws` 每 3 秒全量快照广播；后端不接 CTP、不碰交易进程，交易挂了照样查历史
+- **web-frontend 前端**：Vue3 + Vite + Element Plus + ECharts + lightweight-charts，纯 JS。策略维度首页（策略卡片）→ 策略详情页（净值 / 回撤 / K线 / 合约信息 / 账户持仓），另有 Dashboard / Orders / Logs；白底现代简洁、红涨绿跌（国内期货习惯）
+- **双账户隔离**：两个独立进程（一份代码靠 `CTP_MODE` 切配置），`.vntrader` 按 cwd 隔离，monitor.db 靠 `MONITOR_DB_PATH` 固定绝对路径共享；实盘凭证全走环境变量不落盘、simnow 走 secrets.yaml
+- **订单统计口径修复**：活跃挂单 / 今日委托按 `vt_orderid` 取最新状态去重（不再按行计数），日期归口按交易日（夜盘 20:00 后归下一交易日）
+- **绩效统计与成交配对**：平仓成交按 position_lots FIFO 配对成完整交易写 trade_rounds，胜率 / 盈亏比 / 持仓时间 / 买卖分开 / 净值曲线统一口径
 
----
-
-## v0.1.1 更新（2026-08-20）
-
-- **飞书 HTTP 回调控制**：群里 @机器人 停止/重启实盘策略（`feishu_http_control.py`），父进程常驻、验签 + `message_id` 去重、reply 直连绕过代理
-- **飞书控制机器人文档**：新增 `vnpy-domestic-飞书控制机器人.md`（应用创建/部署/长连接 vs Webhook 原理）
-- **持仓批次 FIFO**：`position_lots.py` 提供 `settle_close`，按交易所规则平仓——DCE/CZCE/GFEX 先开先平、CFFEX 先平今、SHFE/INE 平今平昨
-- **锁仓优化（换月判断）**：`_has_position` 判断实际持仓，`pos=0` 且锁仓多空都为 0 才换月，锁仓对冲不误判空仓
-- **逐日盯市核算**：RolloverCtaEngine 集成 `settle_close` 持仓批次，历史仓按昨结算、当日仓按开仓价
-- **盈亏按交易日统计**：累计盈亏每日收盘归零，次日从 0 起算当日盈亏（隔夜持仓已逐日结算，不影响）
-- **玉米刷盘口策略**：`CornScalperStrategy`（`corn_scalper.py`），MA 判向 + 盘口深度过滤 + 被套锁仓（详见 `corn_scalper.md`）
-- **订单通知**：平仓单挂出推飞书；NOTTRADED 引擎层去重推送；被拒/失效推送
-- **延迟计算**：所有订单统一统计延迟（含挂单排队时间）；取消自动暂停开仓；修复时区减法崩溃
-- **账户报告**：新增活跃挂单列表（合约、方向、价格、成交量、状态）
-- **空 JSON 修复**：`run_cta.py` 启动前自动修复 vnpy 空数据文件崩溃
-- **Linux 部署文档**：新增 `vnpy-domestic-Linux部署.md`（systemd + CTP 凭证环境变量注入）
 
 ---
 
@@ -54,6 +42,7 @@ vnpy-domestic 是一个面向国内期货实盘的 vnpy 扩展工具包。它不
 | 跨交易段 volume 重复计算 | 段首全量 + 后续增量的增量模式 |
 | 实盘无人值守，出问题不知道 | 钉钉/飞书推送 + 策略汇总（`monitor_interval` 可调）|
 | 非交易时段空跑浪费资源 | 守护进程按交易时段自动启停 |
+| 实盘/模拟盘分开跑，看盘要开多个终端 | Web 面板双账户合并展示（web-backend + web-frontend） |
 
 **核心模块 + 策略：**
 
@@ -67,6 +56,9 @@ vnpy-domestic 是一个面向国内期货实盘的 vnpy 扩展工具包。它不
 | `FeishuControl` | `feishu_http_control.py` | 飞书 HTTP 回调控制（@机器人 停止/重启） |
 | `PositionLots` | `position_lots.py` | 持仓批次 FIFO + 平今平昨规则 |
 | `CornScalperStrategy` | `strategies/corn_scalper.py` | 玉米刷盘口策略（MA 判向 + 盘口深度过滤 + 被套锁仓） |
+| `MonitorWriter` | `web-backend/web_backend/writer.py` | 监控库异步写库（queue + 独立线程，交易主循环零阻塞） |
+| `Web Backend` | `web-backend/web_backend/` | FastAPI 只读监控后端（REST + WebSocket） |
+| `Web Frontend` | `web-frontend/` | Vue3 监控面板（双账户切换 + 策略详情 + K线） |
 
 ---
 
@@ -90,6 +82,7 @@ pip install vnpy_ctastrategy vnpy_ctp vnpy_sqlite
 
 ```bash
 pip install pyyaml requests akshare psutil pandas lark-oapi fastapi uvicorn
+pip install -e ./web-backend   # 监控后端（可选；交易进程靠 sys.path 找到它）
 ```
 
 | 包 | 用途 |
@@ -100,7 +93,8 @@ pip install pyyaml requests akshare psutil pandas lark-oapi fastapi uvicorn
 | `psutil` | 系统硬件监控（CPU/内存/磁盘） |
 | `pandas` | CSV 读写与数据整理 |
 | `lark-oapi` | 飞书控制（@机器人 停止/重启） |
-| `fastapi` / `uvicorn` | 飞书 HTTP 回调服务 |
+| `fastapi` / `uvicorn` | 飞书 HTTP 回调服务 + Web 监控后端 |
+| `sqlalchemy` | Web 监控 monitor.db 表定义（交易进程埋点 + 后端读库共用） |
 
 ### 3. 安装 TA-Lib
 
@@ -410,6 +404,49 @@ run_child()
 
 ---
 
+## Web 监控（双账户）
+
+实盘 + simnow 双账户同时跑，Web 面板合并看。链路：交易进程埋点写 monitor.db → web-backend 只读查库 → web-frontend 展示。飞书通知分群、控制只对实盘。
+
+### 架构
+
+```
+[实盘进程 run_cta.py (CTP_MODE=real)]     [模拟进程 run_cta.py (CTP_MODE=simnow)]
+    │ MonitorWriter (account=real)          │ MonitorWriter (account=simnow)
+    ▼                                       ▼
+        monitor.db（同一个库，表带 account 字段，MONITOR_DB_PATH 固定绝对路径）
+                        │
+                        ▼
+        [web-backend uvicorn :8000]  只读查库，REST + WebSocket
+                        │
+                        ▼
+        [web-frontend Vue3]  按 account 分组展示（实盘 / 模拟 / 全部切换）
+```
+
+### 数据流
+
+- **写**：交易进程 RolloverCtaEngine 各事件回调末尾埋点，`MonitorWriter` 用 queue + 独立线程异步落库（不阻塞交易主循环）
+- **读**：web-backend 只读 monitor.db，18 个 REST 接口 + WebSocket `/ws` 每 3 秒全量快照广播；后端不接 CTP、不碰交易进程，交易挂了照样查历史
+- **展示**：web-frontend 策略维度首页 → 策略详情页；REST 填历史全量、WS 推增量
+
+### 本地跑法
+
+```bash
+# 后端（窗口 A，cd 到 web-backend 目录，cwd 进 sys.path）
+export MONITOR_DB_PATH="/path/to/monitor.db"
+python -m uvicorn web_backend.main:app --host 127.0.0.1 --port 8000
+
+# 前端（窗口 B）
+cd web-frontend
+npm run dev        # http://localhost:5173，/api /ws 已代理到 8000
+```
+
+前端已装好 node_modules；`npm run build` 出 dist 交 nginx（服务器不装 node，本机 build 后 scp 上去）。
+
+完整方案 / 前端开发 / 运行部署说明见 `web端监控使用手册.md`。
+
+---
+
 ## 项目结构
 
 ```
@@ -445,6 +482,30 @@ vnpy-domestic/
     ├── corn_scalper.md                 ← 策略详细文档
     ├── dual_ma.py                      ← 双均线策略
     └── save_bar.py                     ← K 线落盘
+```
+
+```
+web-backend/                            ← 监控后端（独立 Python 包，与 vnpy-domestic 平级）
+├── pyproject.toml                      ← fastapi / sqlalchemy / uvicorn 依赖
+└── web_backend/
+    ├── models.py                       ← monitor.db 14 张表（SQLAlchemy 2.0）
+    ├── writer.py                       ← MonitorWriter 写库（交易进程 import）
+    ├── api.py                          ← 18 个 REST 只读接口
+    ├── ws.py                           ← WebSocket /ws 每 3s 全量快照广播
+    ├── db.py                           ← SQLite 连接 + 自动建表
+    ├── main.py                         ← FastAPI 入口（uvicorn :8000）
+    └── seed_demo.py                    ← demo 造数（本地联调验证）
+```
+
+```
+web-frontend/                           ← 监控前端（独立项目，Vue3 + Vite）
+├── package.json                        ← vue / element-plus / echarts / lightweight-charts
+├── vite.config.js                      ← /api /ws 代理到 8000
+└── src/
+    ├── views/                          ← Strategies / StrategyDetail / Dashboard / Orders / Logs
+    ├── components/                     ← AccountCard / AccountSwitch / 图表组件
+    ├── api/                            ← http / index / mock / ws
+    └── router/ store.js constants.js theme.css
 ```
 
 ---

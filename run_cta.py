@@ -1,26 +1,34 @@
-import os
+import json
 import multiprocessing
-import sys
+import os
 import queue
+import sys
 import threading
-from time import sleep
 import time as time_mod
-from datetime import datetime, time as dtime
+from datetime import datetime
+from datetime import time as dtime
+from time import sleep
 
 from vnpy.event import EventEngine
-from vnpy.trader.setting import SETTINGS
 from vnpy.trader.engine import MainEngine
 from vnpy.trader.logger import INFO, logger
+from vnpy.trader.setting import SETTINGS
 from vnpy.trader.utility import get_file_path
-
-from vnpy_ctp import CtpGateway
 from vnpy_ctastrategy.base import EVENT_CTA_LOG
+from vnpy_ctp import CtpGateway
+
+# import the sibling web-backend package (shared monitor-DB models/writer)
+sys.path.insert(0, "../web-backend")
 
 from vnpy_domestic.RolloverCtaEngine.RolloverCtaEngine import RolloverCtaEngine
+from vnpy_domestic.trader.feishu_http_control import (
+    build_control_app,
+    load_feishu_control,
+    reply_text,
+    start_control,
+)
 from vnpy_domestic.trader.notification_manager import NotificationManager
 from vnpy_domestic.trader.update_trading_times import run_and_save
-from vnpy_domestic.trader.feishu_http_control import load_feishu_control, build_control_app, start_control, reply_text
-
 
 SETTINGS["log.active"] = True
 SETTINGS["log.level"] = INFO
@@ -32,11 +40,11 @@ DAY_START = dtime(8, 45)
 DAY_END = dtime(15, 1)
 
 NIGHT_START = dtime(20, 45)
-NIGHT_END = dtime(23, 5)        # 夜盘当日收盘（豆粕/白糖/螺纹/PTA/PVC 等 23:00 收）
+NIGHT_END = dtime(23, 5)  # 夜盘当日收盘（豆粕/白糖/螺纹/PTA/PVC 等 23:00 收）
 
 # 夜盘是否跨零点：跑到 01:00 收（有色）或 02:30 收（原油/贵金属）的品种时改 True
 NIGHT_CROSS_MIDNIGHT = False
-MIDNIGHT_END = dtime(2, 45)     # 跨零点夜盘延续截止（NIGHT_CROSS_MIDNIGHT=True 时生效）
+MIDNIGHT_END = dtime(2, 45)  # 跨零点夜盘延续截止（NIGHT_CROSS_MIDNIGHT=True 时生效）
 
 
 def check_trading_period() -> bool:
@@ -60,21 +68,35 @@ def check_trading_period() -> bool:
 
 
 def load_ctp_setting() -> dict:
-    """加载CTP配置：用户名密码走环境变量，其余硬编码"""
+    """加载 CTP 配置：按 CTP_MODE 分支（simnow 硬编码，实盘全走环境变量不落盘）"""
+    mode = os.getenv("CTP_MODE", "real")
     username = os.getenv("CTP_USER")
     password = os.getenv("CTP_PASSWORD")
     if not username or not password:
         return {}
 
+    if mode == "simnow":
+        return {
+            "用户名": username,
+            "密码": password,
+            "经纪商代码": "9999",
+            "交易服务器": "182.254.243.31:30003",
+            "行情服务器": "182.254.243.31:30013",
+            "产品名称": "simnow_client_test",
+            "授权编码": "0000000000000000",
+            "产品信息": "",
+        }
+
+    # 实盘：凭证与服务器信息全走环境变量，代码里不留真实信息
     return {
         "用户名": username,
         "密码": password,
-        "经纪商代码": "9999",
-        "交易服务器": "182.254.243.31:30003",
-        "行情服务器": "182.254.243.31:30013",
-        "产品名称": "simnow_client_test",
-        "授权编码": "0000000000000000",
-        "产品信息": ""
+        "经纪商代码": os.getenv("CTP_BROKER", ""),
+        "交易服务器": os.getenv("CTP_TD_SERVER", ""),
+        "行情服务器": os.getenv("CTP_MD_SERVER", ""),
+        "产品名称": os.getenv("CTP_APPID", ""),
+        "授权编码": os.getenv("CTP_AUTHCODE", ""),
+        "产品信息": "",
     }
 
 
@@ -87,7 +109,7 @@ def run_child(child_conn=None) -> None:
         logger.error("CTP 配置加载失败，子进程退出")
         sys.exit(1)
 
-    notify = NotificationManager()
+    notify = NotificationManager(feishu_webhook=os.getenv("FEISHU_WEBHOOK", ""))
     notify.set_log_callback(lambda msg: logger.info(f"[Notify] {msg}"))
 
     event_engine: EventEngine = EventEngine()
@@ -107,11 +129,17 @@ def run_child(child_conn=None) -> None:
     logger.info("等待CTP连接和数据加载...")
     sleep(40)
 
-    # 修复 vnpy 空 JSON 文件导致崩溃的 bug
-    p = get_file_path("cta_strategy_data.json")
-    if p.exists() and p.stat().st_size == 0:
-        p.write_text("{}")
-        logger.info("已修复空 JSON 文件: cta_strategy_data.json")
+    # 修复 vnpy 空/损坏 JSON 文件导致崩溃的 bug（size==0 或 json 解析失败都重置）
+    for filename in ("cta_strategy_setting.json", "cta_strategy_data.json"):
+        p = get_file_path(filename)
+        if not p.exists():
+            continue
+        try:
+            with open(p, encoding="utf-8") as f:
+                json.load(f)
+        except Exception:
+            p.write_text("{}")
+            logger.info(f"已修复损坏的 JSON 文件: {filename}")
 
     cta_engine.init_engine()
     logger.info("CTA引擎初始化完成（策略已自动加载）")
@@ -130,7 +158,9 @@ def run_child(child_conn=None) -> None:
     try:
         # 启动后发一次账户报告（含系统状态）
         sleep(5)
-        notify.send_account_report(main_engine, order_stats=cta_engine.get_daily_order_stats())
+        notify.send_account_report(
+            main_engine, order_stats=cta_engine.get_daily_order_stats()
+        )
 
         last_report_time = time_mod.time()
         REPORT_INTERVAL = 420  # 7分钟
@@ -151,7 +181,9 @@ def run_child(child_conn=None) -> None:
                 break
 
             if time_mod.time() - last_report_time >= REPORT_INTERVAL:
-                notify.send_account_report(main_engine, order_stats=cta_engine.get_daily_order_stats())
+                notify.send_account_report(
+                    main_engine, order_stats=cta_engine.get_daily_order_stats()
+                )
                 last_report_time = time_mod.time()
 
     except KeyboardInterrupt:
@@ -195,18 +227,32 @@ def run_parent() -> None:
     run_and_save()
     print("=" * 60)
 
-    # ── 飞书控制（放父进程，常驻，非交易时段也能用）──
+    # ── 飞书控制（放父进程，常驻，非交易时段也能用；只实盘开，避免双进程抢 3000）──
     ctrl_queue = queue.Queue()
-    feishu = load_feishu_control()
-    if feishu.get("app_id"):
-        app = build_control_app(ctrl_queue, feishu["app_id"], feishu["app_secret"],
-                                feishu["encrypt_key"], feishu["verification_token"],
-                                feishu["bot_open_id"])
-        threading.Thread(target=start_control,
-                         args=(app, feishu["host"], 3000), daemon=True).start()
-        print(f"飞书 HTTP 控制已启动（父进程），监听 {feishu['host']}:3000", flush=True)
-        if feishu.get("public_url"):
-            print(f"飞书后台「请求地址」填: {feishu['public_url']}/webhook/feishu", flush=True)
+    feishu = {}
+    if os.getenv("CTP_MODE", "real") == "real":
+        feishu = load_feishu_control()
+        if feishu.get("app_id"):
+            app = build_control_app(
+                ctrl_queue,
+                feishu["app_id"],
+                feishu["app_secret"],
+                feishu["encrypt_key"],
+                feishu["verification_token"],
+                feishu["bot_open_id"],
+            )
+            threading.Thread(
+                target=start_control, args=(app, feishu["host"], 3000), daemon=True
+            ).start()
+            print(
+                f"飞书 HTTP 控制已启动（父进程），监听 {feishu['host']}:3000",
+                flush=True,
+            )
+            if feishu.get("public_url"):
+                print(
+                    f"飞书后台「请求地址」填: {feishu['public_url']}/webhook/feishu",
+                    flush=True,
+                )
 
     child_process = None
     parent_conn = None
@@ -230,7 +276,10 @@ def run_parent() -> None:
                     if action == "stop":
                         manual_stop = True
                         if child_process is not None and child_process.is_alive():
-                            print("🛑 飞书指令：停止子进程（正常退出，撤挂单+写持仓）", flush=True)
+                            print(
+                                "🛑 飞书指令：停止子进程（正常退出，撤挂单+写持仓）",
+                                flush=True,
+                            )
                             if parent_conn is not None:
                                 parent_conn.send("stop")
                             child_process.join(timeout=30)
@@ -244,12 +293,19 @@ def run_parent() -> None:
                             reply = "停止已完成（后续时段不再自动启动，需 @机器人 发重启恢复）"
                         else:
                             reply = "当前无运行中的子进程，已置停止状态（需 @机器人 发重启恢复）"
-                        reply_text(feishu.get("app_id"), feishu.get("app_secret"),
-                                   msg_id, reply)
+                        reply_text(
+                            feishu.get("app_id"),
+                            feishu.get("app_secret"),
+                            msg_id,
+                            reply,
+                        )
                     elif action == "restart":
                         manual_stop = False
                         if child_process is not None and child_process.is_alive():
-                            print("🔄 飞书指令：重启子进程（正常退出旧子进程）", flush=True)
+                            print(
+                                "🔄 飞书指令：重启子进程（正常退出旧子进程）",
+                                flush=True,
+                            )
                             if parent_conn is not None:
                                 parent_conn.send("stop")
                             child_process.join(timeout=30)
@@ -261,20 +317,32 @@ def run_parent() -> None:
                             child_process = None
                         if trading:
                             parent_conn, child_conn = multiprocessing.Pipe()
-                            child_process = multiprocessing.Process(target=run_child, args=(child_conn,))
+                            child_process = multiprocessing.Process(
+                                target=run_child, args=(child_conn,)
+                            )
                             child_process.start()
                             child_start_time = time_mod.time()
-                            reply_text(feishu.get("app_id"), feishu.get("app_secret"),
-                                       msg_id, f"重启已完成 (PID {child_process.pid})")
+                            reply_text(
+                                feishu.get("app_id"),
+                                feishu.get("app_secret"),
+                                msg_id,
+                                f"重启已完成 (PID {child_process.pid})",
+                            )
                         else:
-                            reply_text(feishu.get("app_id"), feishu.get("app_secret"),
-                                       msg_id, "重启已完成（非交易时段，子进程未启动）")
+                            reply_text(
+                                feishu.get("app_id"),
+                                feishu.get("app_secret"),
+                                msg_id,
+                                "重启已完成（非交易时段，子进程未启动）",
+                            )
 
             if trading and child_process is None and not manual_stop:
                 print(f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 print("🔄 交易时段开始，启动子进程...")
                 parent_conn, child_conn = multiprocessing.Pipe()
-                child_process = multiprocessing.Process(target=run_child, args=(child_conn,))
+                child_process = multiprocessing.Process(
+                    target=run_child, args=(child_conn,)
+                )
                 child_process.start()
                 print(f"✅ 子进程启动成功 (PID: {child_process.pid})")
                 child_start_time = time_mod.time()
