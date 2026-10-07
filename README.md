@@ -56,7 +56,7 @@ vnpy-domestic 是一个面向国内期货实盘的 vnpy 扩展工具包。它不
 | `FeishuControl` | `feishu_http_control.py` | 飞书 HTTP 回调控制（@机器人 停止/重启） |
 | `PositionLots` | `position_lots.py` | 持仓批次 FIFO + 平今平昨规则 |
 | `CornScalperStrategy` | `strategies/corn_scalper.py` | 玉米刷盘口策略（MA 判向 + 盘口深度过滤 + 被套锁仓） |
-| `MonitorWriter` | `web-backend/web_backend/writer.py` | 监控库异步写库（queue + 独立线程，交易主循环零阻塞） |
+| `MonitorWriter` | `vnpy_domestic/monitor/writer.py` | 监控库异步写库（queue + 独立线程，交易主循环零阻塞） |
 | `Web Backend` | `web-backend/web_backend/` | FastAPI 只读监控后端（REST + WebSocket） |
 | `Web Frontend` | `web-frontend/` | Vue3 监控面板（双账户切换 + 策略详情 + K线） |
 
@@ -81,8 +81,8 @@ pip install vnpy_ctastrategy vnpy_ctp vnpy_sqlite
 ### 2. 安装依赖
 
 ```bash
-pip install pyyaml requests akshare psutil pandas lark-oapi fastapi uvicorn
-pip install -e ./web-backend   # 监控后端（可选；交易进程靠 sys.path 找到它）
+pip install pyyaml requests akshare psutil pandas lark-oapi fastapi uvicorn sqlalchemy
+pip install -e ./web-backend   # 监控后端（可选；只在跑 Web 面板时需要）
 ```
 
 | 包 | 用途 |
@@ -467,6 +467,10 @@ vnpy-domestic/
 │
 ├── vnpy_domestic/
 │   ├── __init__.py                     ← 导出 MyBarGenerator，注册 akshare 别名
+│   ├── monitor/
+│   │   ├── __init__.py                 ← 导出 models + MonitorWriter
+│   │   ├── models.py                   ← monitor.db 14 张表（写侧，与 web-backend 读侧同步）
+│   │   └── writer.py                   ← MonitorWriter 写库（queue + 独立线程）
 │   ├── trader/
 │   │   ├── newbargenerator.py          ← MyBarGenerator + 交易时段模块
 │   │   ├── notification_manager.py     ← 钉钉/飞书通知
@@ -485,11 +489,10 @@ vnpy-domestic/
 ```
 
 ```
-web-backend/                            ← 监控后端（独立 Python 包，与 vnpy-domestic 平级）
+web-backend/                            ← 监控后端（独立只读包，不依赖 vnpy-domestic）
 ├── pyproject.toml                      ← fastapi / sqlalchemy / uvicorn 依赖
 └── web_backend/
-    ├── models.py                       ← monitor.db 14 张表（SQLAlchemy 2.0）
-    ├── writer.py                       ← MonitorWriter 写库（交易进程 import）
+    ├── models.py                       ← monitor.db 14 张表（读侧副本，与写侧保持同步）
     ├── api.py                          ← 18 个 REST 只读接口
     ├── ws.py                           ← WebSocket /ws 每 3s 全量快照广播
     ├── db.py                           ← SQLite 连接 + 自动建表

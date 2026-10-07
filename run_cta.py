@@ -22,9 +22,6 @@ from vnpy.trader.utility import get_file_path
 from vnpy_ctastrategy.base import EVENT_CTA_LOG
 from vnpy_ctp import CtpGateway
 
-# import the sibling web-backend package (shared monitor-DB models/writer)
-sys.path.insert(0, "../web-backend")
-
 from vnpy_domestic.RolloverCtaEngine.RolloverCtaEngine import RolloverCtaEngine
 from vnpy_domestic.trader.feishu_http_control import (
     build_control_app,

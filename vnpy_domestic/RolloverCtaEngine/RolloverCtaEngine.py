@@ -21,54 +21,23 @@ from vnpy_ctastrategy.engine import CtaEngine
 from vnpy_domestic.trader.notification_manager import NotificationManager
 from vnpy_domestic.trader.position_lots import settle_close, trading_day
 
-try:
-    from web_backend.models import (
-        Account as MonitorAccount,
-    )
-    from web_backend.models import (
-        Contract as MonitorContract,
-    )
-    from web_backend.models import (
-        DailyPnl as MonitorDailyPnl,
-    )
-    from web_backend.models import (
-        Kline as MonitorKline,
-    )
-    from web_backend.models import (
-        Log as MonitorLog,
-    )
-    from web_backend.models import (
-        Order as MonitorOrder,
-    )
-    from web_backend.models import (
-        Position as MonitorPosition,
-    )
-    from web_backend.models import (
-        AccountPosition as MonitorAccountPosition,
-    )
-    from web_backend.models import (
-        AccountDailyPnl as MonitorAccountDailyPnl,
-    )
-    from web_backend.models import (
-        StrategyIntraday as MonitorStrategyIntraday,
-    )
-    from web_backend.models import (
-        StrategyStatus as MonitorStrategyStatus,
-    )
-    from web_backend.models import (
-        SystemMetric as MonitorSystemMetric,
-    )
-    from web_backend.models import (
-        Trade as MonitorTrade,
-    )
-    from web_backend.models import (
-        TradeRound as MonitorTradeRound,
-    )
-    from web_backend.writer import MonitorWriter
-
-    _MONITOR_AVAILABLE = True
-except ImportError:
-    _MONITOR_AVAILABLE = False
+from vnpy_domestic.monitor import (
+    Account as MonitorAccount,
+    AccountDailyPnl as MonitorAccountDailyPnl,
+    AccountPosition as MonitorAccountPosition,
+    Contract as MonitorContract,
+    DailyPnl as MonitorDailyPnl,
+    Kline as MonitorKline,
+    Log as MonitorLog,
+    Order as MonitorOrder,
+    Position as MonitorPosition,
+    StrategyIntraday as MonitorStrategyIntraday,
+    StrategyStatus as MonitorStrategyStatus,
+    SystemMetric as MonitorSystemMetric,
+    Trade as MonitorTrade,
+    TradeRound as MonitorTradeRound,
+    MonitorWriter,
+)
 
 # CTP InstrumentID 字母小写的交易所，其余（CZCE/CFFEX）大写
 LOWER_CASE_EXCHANGES = ("DCE", "SHFE", "INE", "GFEX")
@@ -165,10 +134,9 @@ class RolloverCtaEngine(CtaEngine):
 
         # ── 监控写库（可选：设置 MONITOR_DB_PATH 才启用，非阻塞不干扰交易） ──
         self.monitor = None
-        if _MONITOR_AVAILABLE:
-            db_path = os.getenv("MONITOR_DB_PATH")
-            if db_path:
-                self.monitor = MonitorWriter(db_path)
+        db_path = os.getenv("MONITOR_DB_PATH")
+        if db_path:
+            self.monitor = MonitorWriter(db_path)
         self.account = os.getenv("CTP_MODE", "real")
 
         # ── 高频快照缓存（3s 浮动盈亏/保证金计算用） ──
