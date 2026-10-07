@@ -454,6 +454,7 @@ vnpy-domestic/
 ├── run_cta.py                          ← 实盘入口（守护进程）
 ├── README.md                           ← 本文件
 ├── vnpy-domestic-Linux部署.md           ← Linux 服务器部署
+├── vnpy-domestic-web端监控使用手册.md    ← Web 面板部署/运行说明
 ├── vnpy-domestic-飞书控制机器人.md      ← 飞书控制机器人部署
 ├── pyproject.toml                      ← 包配置
 ├── .gitignore                          ← 保护 .vntrader/
@@ -462,14 +463,13 @@ vnpy-domestic/
 │   ├── secrets.yaml                    ← 通知 Webhook
 │   ├── cta_strategy_setting.json       ← 策略参数
 │   ├── cta_strategy_data.json          ← 策略变量持久化（有成交后自动填充）
-│   ├── trading_times.csv               ← 交易时段（自动更新）
-│   └── bar_data/                       ← K 线数据
+│   └── trading_times.csv               ← 交易时段（自动更新）
 │
 ├── vnpy_domestic/
 │   ├── __init__.py                     ← 导出 MyBarGenerator，注册 akshare 别名
 │   ├── monitor/
 │   │   ├── __init__.py                 ← 导出 models + MonitorWriter
-│   │   ├── models.py                   ← monitor.db 14 张表（写侧，与 web-backend 读侧同步）
+│   │   ├── models.py                   ← monitor.db 14 张表（写侧）
 │   │   └── writer.py                   ← MonitorWriter 写库（queue + 独立线程）
 │   ├── trader/
 │   │   ├── newbargenerator.py          ← MyBarGenerator + 交易时段模块
@@ -484,31 +484,7 @@ vnpy-domestic/
 └── strategies/
     ├── corn_scalper.py                 ← 玉米刷盘口策略
     ├── corn_scalper.md                 ← 策略详细文档
-    ├── dual_ma.py                      ← 双均线策略
-    └── save_bar.py                     ← K 线落盘
-```
-
-```
-web-backend/                            ← 监控后端（独立只读包，不依赖 vnpy-domestic）
-├── pyproject.toml                      ← fastapi / sqlalchemy / uvicorn 依赖
-└── web_backend/
-    ├── models.py                       ← monitor.db 14 张表（读侧副本，与写侧保持同步）
-    ├── api.py                          ← 18 个 REST 只读接口
-    ├── ws.py                           ← WebSocket /ws 每 3s 全量快照广播
-    ├── db.py                           ← SQLite 连接 + 自动建表
-    ├── main.py                         ← FastAPI 入口（uvicorn :8000）
-    └── seed_demo.py                    ← demo 造数（本地联调验证）
-```
-
-```
-web-frontend/                           ← 监控前端（独立项目，Vue3 + Vite）
-├── package.json                        ← vue / element-plus / echarts / lightweight-charts
-├── vite.config.js                      ← /api /ws 代理到 8000
-└── src/
-    ├── views/                          ← Strategies / StrategyDetail / Dashboard / Orders / Logs
-    ├── components/                     ← AccountCard / AccountSwitch / 图表组件
-    ├── api/                            ← http / index / mock / ws
-    └── router/ store.js constants.js theme.css
+    └── dual_ma.py                      ← 双均线策略
 ```
 
 ---

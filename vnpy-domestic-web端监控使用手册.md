@@ -469,7 +469,7 @@ python -c "import sqlite3; c=sqlite3.connect('C:/Users/<你>/Desktop/vnpy/monito
 ### 8.1 环境配置
 
 - **服务器（腾讯云 Ubuntu）**：conda vnpy 环境，`pip install -e .`（镜像 mirrors.tencentyun.com）
-- **nginx + certbot**（一次性）：`sudo apt install nginx certbot python3-certbot-nginx`
+- **nginx**（一次性）：`sudo apt install nginx`
 - **前端 build 在本机做**，服务器全程不装 node
 
 ### 8.2 部署步骤
@@ -536,7 +536,7 @@ ExecStart=... python run_cta.py
 > uvicorn 只监听 127.0.0.1，公网入口只留 nginx。开启/关闭监控后端：
 > `sudo systemctl enable --now vnpy-web-backend` / `sudo systemctl disable --now vnpy-web-backend`（交易不受影响）。
 
-### 8.4 nginx（唯一公网入口，443）
+### 8.4 nginx（唯一公网入口，80，纯 HTTP）
 
 | 浏览器访问 | nginx 处理 |
 |:--|:--|
@@ -545,10 +545,17 @@ ExecStart=... python run_cta.py
 | `/ws` | 反代 127.0.0.1:8000（websocket） |
 | `/webhook/feishu` | 反代 127.0.0.1:3000（可选，收编飞书） |
 
+配置文件放 `/etc/nginx/sites-available/monitor`，软链到 sites-enabled，删默认站点：
+
+```bash
+sudo nano /etc/nginx/sites-available/monitor
+sudo ln -s /etc/nginx/sites-available/monitor /etc/nginx/sites-enabled/
+sudo rm /etc/nginx/sites-enabled/default
+```
+
 ```nginx
 server {
-    listen 443 ssl;
-    # ... ssl 证书 ...
+    listen 80;
 
     # 前端静态 + history 路由 fallback
     location / {
@@ -572,16 +579,16 @@ server {
 }
 ```
 
+```bash
+sudo nginx -t                 # 语法检查必须通过
+sudo systemctl reload nginx
+```
+
 两个必踩坑：`try_files ... /index.html`（history 路由刷新 404）；`/ws` 缺 `Upgrade`/`Connection` 升级头会握手失败、前端一直重连。
 
-### 8.5 公网访问（域名 + DNS + 备案）
+### 8.5 公网访问（不搞 HTTPS / 域名）
 
-1. 买域名（腾讯云，.top/.xyz 几十块）+ 实名认证
-2. ICP 备案（国内服务器必须，7-20 个工作日，没备案 80/443 被封；纯 IP 访问不受影响）
-3. DNS 解析（DNSPod 加 A 记录）
-4. HTTPS 证书：`sudo certbot --nginx -d monitor.域名.com`
-
-备案前过渡：自己看面板用 `http://公网IP:端口`；飞书回调继续用 localtunnel 穿透。不想备案的绕过：Tailscale / ZeroTier 虚拟内网，或 SSH 隧道 `ssh -L 8000:127.0.0.1:8000 ubuntu@服务器`。
+不备案不买域名：直接 `http://公网IP`（80 端口）访问面板即可；飞书控制回调仍用 localtunnel 穿透（见飞书控制机器人文档）。更稳的替代是 SSH 隧道 `ssh -L 8000:127.0.0.1:8000 ubuntu@服务器` 或 Tailscale / ZeroTier 组内网，不把端口暴露公网。将来要 HTTPS + 域名再走「域名 + DNS + ICP 备案 + certbot」，此处从略。
 
 ---
 
@@ -596,7 +603,7 @@ server {
 7. **WS 死连接清理**：遍历 `active` 别边删边遍历（跳元素），用 `for ws in list(active)`。
 8. **broadcaster 空转**：无连接时跳过查库（`if not active: continue`）。
 9. **HTTPS 后 WS 用 wss**：前端按 `location.protocol` 自动切 ws/wss。
-10. **监控只读**：REST/WS 全部只读不下单，公网靠 nginx basic_auth 兜底，别把 8000 裸奔。
+10. **监控只读**：REST/WS 全部只读不下单；纯 HTTP 暴露公网必须上 nginx basic_auth，别把 8000 裸奔。
 11. **飞书控制只实盘开**：两个进程都起 3000 会抢端口。
 12. **实盘信息不落盘**：实盘 CTP 全走环境变量；模拟密码可进 secrets.yaml，但绝不写源码（公开仓库）。
 13. **依赖补 sqlalchemy**：pyproject 缺 `sqlalchemy>=2.0` 不补 import models 直接崩。
