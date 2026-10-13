@@ -89,7 +89,7 @@ nginx（部署后）：:443 唯一公网入口，静态 + 反代 8000
 
 3. **飞书控制只实盘开**：`run_cta.py` 里 `if os.getenv("CTP_MODE", "real") == "real":` 才启动。simnow 进程 `CTP_MODE=simnow` 不满足，不启飞书控制端口，所以机器人天生只绑定实盘，不存在「识别错账户」。
 
-4. **「控制」和「通知」是两回事**：控制（@机器人 停/重启）只实盘有；通知（推消息）分群，实盘群、模拟群各一个 webhook（`feishu_webhook_real` / `feishu_webhook_simnow`）。
+4. **「控制」和「通知」是两回事**：控制（@机器人 停/重启）只实盘有；通知（推消息）走 `feishu_webhook` 一个字段，实盘/模拟盘各账户目录的 secrets.yaml 各填各群的 webhook（靠目录隔离分群）。
 
 5. **端口不冲突**：3000（飞书控制）/ 8000（后端）/ 5173（前端 dev）/ 443（nginx）各占各的。
 
@@ -147,7 +147,7 @@ vnpy 的 `.vntrader` 数据目录按「当前工作目录」解析（cwd 下有 
 ### 3.6 飞书（控制 + 通知）
 
 - **控制**（@机器人 停止/重启，自建应用）：只对实盘有意义，只实盘开
-- **通知**（群机器人 webhook）：分两个群，进程启动按 CTP_MODE 选对应 webhook，文案加 `[实盘]`/`[模拟]` 前缀
+- **通知**（群机器人 webhook）：`feishu_webhook` 一个字段，实盘/模拟盘各目录 secrets.yaml 各填各群 webhook（目录隔离分群），文案加 `[实盘]`/`[模拟]` 前缀
 
 ## 4. 监控数据库 monitor.db
 
@@ -361,7 +361,7 @@ Desktop/vnpy/
 ├── vnpy-domestic/      ① 交易核心（git 仓库）——源码统一放这
 │   ├── run_cta.py        入口（父子双进程守护）
 │   ├── vnpy_domestic/    包（RolloverCtaEngine + monitor + trader）
-│   ├── strategies/       策略源码（git 白名单只提交 dual_ma.py；corn_scalper 实盘专属不提交）
+│   ├── strategies/       策略源码（git 白名单只提交 dual_ma.py，其余策略都不提交）
 │   ├── scripts/          cleanup_monitor.py（监控库清理脚本）
 │   ├── .vntrader/        本地默认配置+数据（gitignore：只保留 *.example 和 vt_setting.json）
 │   │   ├── cta_strategy_setting.json / .example
@@ -376,7 +376,7 @@ Desktop/vnpy/
 │   └── dist/             npm run build 生成（gitignore，nginx 用）
 ├── 实盘/               实盘账户目录（非 git）——只放运行时数据
 │   ├── .vntrader/        实盘配置+数据
-│   └── strategies/       策略副本（当前为空）
+│   └── strategies/       策略副本（short_dual_ma 玉米做空）
 ├── 模拟盘simnow/       simnow 账户目录（非 git）——同上
 │   ├── .vntrader/        模拟配置+数据
 │   └── strategies/       策略副本（corn_scalper / dual_ma / save_bar）
@@ -401,6 +401,8 @@ Desktop/vnpy/
 
 ### 7.3 环境变量
 
+> **shell 语法别混**：本地 Windows 可能开 PowerShell（默认）、git-bash、cmd 三种 shell，设环境变量语法各不同——PowerShell 用 `$env:VAR="值"`，git-bash 用 `export VAR=值`，cmd 用 `set VAR=值`。下文示例按 git-bash 的 `export` 写，PowerShell 把 `export VAR=值` 换成 `$env:VAR="值"` 即可。**尤其别在 PowerShell 里用 `set`**：`set` 是 `Set-Variable` 的别名，设的是 PowerShell 内部变量而非环境变量，子进程读不到，会报「请设置 CTP_USER 和 CTP_PASSWORD」。
+
 实盘凭证走环境变量；simnow 凭证写在账户目录 secrets.yaml。simnow 只需 1 个环境变量 CTP_MODE（broker 9999 / 服务器已写死）：
 
 ```bash
@@ -421,7 +423,7 @@ export CTP_APPID=<产品名>
 export CTP_AUTHCODE=<授权编码>
 ```
 
-监控写库（三进程共用同一绝对路径，不设则不写库）：
+监控写库（三进程共用同一绝对路径；**不设则静默不写库、无任何提示**，前端面板数据为空）：
 
 ```bash
 export MONITOR_DB_PATH="C:/Users/<你>/Desktop/vnpy/monitor.db"
@@ -869,6 +871,9 @@ sudo certbot --nginx -d 你的域名
 18. **时间零转换**：后端已存北京时间字符串，前端直接显示，别再 `new Date()` 转一遍（带本地时区错乱）。
 19. **订单统计按 vt_orderid 去重**：同一订单有多行状态流转（SUBMITTING → ALLTRADED），活跃挂单/今日委托要按 vt_orderid 取最新状态，不能按行计数；日期归口按交易日（夜盘 20:00 后归下一交易日）。
 20. **删表字段要连带删列**：models 里删字段时，老库对应列若 `NOT NULL`（如旧 `delay_ms`），新代码 INSERT 不写它就会 `NOT NULL constraint failed`、写库静默失败。迁移时用 `ALTER TABLE ... DROP COLUMN` 把废弃列一起删掉。
+21. **MONITOR_DB_PATH 未设静默禁写库**：`RolloverCtaEngine` 里 `if db_path:` 才建 MonitorWriter，不设就整段跳过、无任何报错/提示，前端面板数据为空。排查「前端没实盘数据」先查这个环境变量设没设。
+22. **账户目录缺 secrets.yaml 会 fallback 到源码占位符**：`_load_secrets()` 按 cwd → 源码 → home 查找，账户目录没配 secrets.yaml 就回退到源码目录的 `.example` 占位符（webhook「你的webhook」、app_id「cli_xxx」），导致飞书通知报 `incoming webhook access token invalid`、飞书控制假启动。每个账户目录必须配自己的 secrets.yaml。
+23. **策略状态汇总 window=0 是显示问题**：引擎状态汇总只读 `strategy.bg`（1 分钟 MyBarGenerator），双 BarGenerator 做 N 分钟周期时，`bg_window`（window=N）不被显示，状态里 `window=0` 不代表周期没生效。
 
 ---
 
