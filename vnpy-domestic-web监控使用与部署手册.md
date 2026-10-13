@@ -545,19 +545,17 @@ python -c "import sqlite3; c=sqlite3.connect('C:/Users/<你>/Desktop/vnpy/monito
 
 ## 10. 前端部署
 
-### 10.1 安装 Node（仅方式 A）
+### 10.1 安装 Node（仅方式 A，conda 装）
 
 vite 8.x 要求 Node ≥ 20.19，装 Node 22 LTS：
 
 ```bash
-export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-source ~/.bashrc
-nvm install 22
+# 用 conda 装 Node 22 到 base 环境（conda-forge 提供，npm 随装），不用 nvm
+conda install -n base -c conda-forge nodejs=22
 node -v      # 验证：输出 v22.x
 ```
 
-> 若 `raw.githubusercontent.com` 拉不动，改用 ghproxy 代理或直接下载 npmmirror 的 Node 二进制包（见附录 C）。
+> conda 拉 conda-forge 慢时，先配腾讯云 conda 镜像再重试：`conda config --add channels https://mirrors.tencentyun.com/anaconda/cloud/conda-forge/`。Node 只在前端 build 时用一次，装 base 环境即可。若不想用 conda 装 Node，可用 nvm + 清华镜像方案（见附录 C）。
 
 ### 10.2 clone + 构建
 
@@ -587,7 +585,7 @@ scp -r dist/* ubuntu@你的IP:/home/ubuntu/web-frontend/dist/
 
 ## 11. 后端部署
 
-后端只依赖三个包（fastapi / sqlalchemy / uvicorn），用独立 venv，不碰实盘 vnpy-domestic 的环境。
+后端只依赖三个包（fastapi / sqlalchemy / uvicorn），直接复用 conda vnpy 环境（与交易进程同环境，不另建 venv）。
 
 ### 11.1 clone
 
@@ -597,12 +595,12 @@ sudo git clone https://github.com/practicemakeperfect666/web-backend.git
 sudo chown -R ubuntu:ubuntu web-backend
 ```
 
-### 11.2 venv + 安装
+### 11.2 conda vnpy 环境 + 安装
 
 ```bash
 cd /home/ubuntu/web-backend
-python3 -m venv venv
-venv/bin/pip install -e . -i https://mirrors.tencentyun.com/pypi/simple
+conda activate vnpy
+pip install -e . -i https://mirrors.tencentyun.com/pypi/simple
 ```
 
 ### 11.3 MONITOR_DB_PATH 环境变量（关键）
@@ -626,7 +624,7 @@ After=network.target
 User=ubuntu
 WorkingDirectory=/home/ubuntu/web-backend
 Environment=MONITOR_DB_PATH=/home/ubuntu/vnpy-data/monitor.db
-ExecStart=/home/ubuntu/web-backend/venv/bin/python -m uvicorn web_backend.main:app --host 127.0.0.1 --port 8000
+ExecStart=/home/ubuntu/miniconda3/envs/vnpy/bin/python -m uvicorn web_backend.main:app --host 127.0.0.1 --port 8000
 Restart=always
 
 [Install]
@@ -669,9 +667,11 @@ done
 # 编辑各自 .vntrader/secrets.yaml（simnow 密码 / 飞书 webhook）、cta_strategy_setting.json（策略参数）
 # trading_times.csv（交易时段）gitignore 了，从本地 scp 上去
 
-# 4. 交易核心 + 后端包装进 conda vnpy 环境（镜像 mirrors.tencentyun.com）
-pip install -e /home/ubuntu/vnpy-domestic   # 交易核心
-pip install -e /home/ubuntu/web-backend     # 后端（web_backend 包进环境）
+# 4. 交易核心装进 conda vnpy 环境（镜像 mirrors.tencentyun.com）
+conda activate vnpy
+cd /home/ubuntu/vnpy-domestic
+pip install -e . -i https://mirrors.tencentyun.com/pypi/simple   # 交易核心
+# （后端 web_backend 已在第 11.2 节装进同一 vnpy 环境，无需重复安装）
 
 # 5. 建共享库目录
 mkdir -p /home/ubuntu/vnpy-data
@@ -679,7 +679,17 @@ mkdir -p /home/ubuntu/vnpy-data
 
 ### 12.2 systemd 交易 unit
 
+> **两个 unit 二选一即可，不必同时建**：只跑实盘就只建 real、只跑模拟盘就只建 sim，单账户裁剪见 12.3。
+
 两个 unit（vnpy-trade-real / vnpy-trade-sim）靠各自 unit 里的 `Environment=CTP_MODE` 区分（实盘 real / 模拟 simnow）；敏感凭证不写进 unit 文件：
+
+创建并编辑实盘 unit（只跑实盘就建这一个）：
+
+```bash
+sudo nano /etc/systemd/system/vnpy-trade-real.service
+```
+
+粘贴整段：
 
 ```ini
 # /etc/systemd/system/vnpy-trade-real.service
@@ -699,6 +709,14 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 ```
+
+创建并编辑模拟盘 unit（只跑模拟盘就建这一个）：
+
+```bash
+sudo nano /etc/systemd/system/vnpy-trade-sim.service
+```
+
+粘贴整段：
 
 ```ini
 # /etc/systemd/system/vnpy-trade-sim.service
@@ -720,15 +738,43 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-# 实盘凭证注入（内存，不落盘；重启服务器后清空，需重新执行）
+# 加载 unit + 开机自启（--now = 开机自启 + 立即启动，不用再单独 start）
+sudo systemctl daemon-reload
+sudo systemctl enable --now vnpy-trade-real      # 只跑实盘用这行
+# 只跑模拟盘用下面两行（去掉行首 #）：
+# sudo systemctl enable --now vnpy-trade-sim
+# sudo systemctl status vnpy-trade-sim           # 验证 active (running)
+
+# 只跑实盘才需要：注入凭证（内存，不落盘；重启服务器后清空需重新注入；模拟盘跳过）
 sudo systemctl set-environment \
   CTP_USER=<实盘账号> CTP_PASSWORD=<实盘密码> CTP_BROKER=<brokerID> \
   CTP_TD_SERVER=<td地址> CTP_MD_SERVER=<md地址> CTP_APPID=<产品名> CTP_AUTHCODE=<授权编码>
 sudo systemctl restart vnpy-trade-real
+sudo systemctl status vnpy-trade-real     # 验证 active (running)
 ```
 
 > 区分机制：`CTP_MODE` 写死在各自 unit 的 `Environment=`（unit 变量每进程独立，实盘读 real、模拟盘读 simnow，互不覆盖）；**实盘凭证**走 `systemctl set-environment` 注入内存（敏感，不落盘，重启服务器后清空需重新注入）；**模拟盘凭证**写在账户目录 `.vntrader/secrets.yaml`（simnow_user / simnow_password，虚拟资金不敏感）。三条各管各的：CTP_MODE 走 unit 文件、实盘凭证走 manager 环境、模拟盘凭证走 secrets.yaml，互不串号。飞书机器人仍在实盘父进程里跑 3000，不收编也不影响。
 > 开启/关闭监控后端：`sudo systemctl enable --now web-backend` / `sudo systemctl disable --now web-backend`（交易不受影响）。
+
+### 12.3 只跑单账户（实盘或模拟盘二选一）
+
+上面 12.1 / 12.2 按「双账户并行」写，只跑一个账户时按需裁剪：
+
+**只跑实盘**（不要模拟盘）：
+
+- 12.1 第 2 步只建 `实盘` 目录，跳过 `模拟盘simnow`
+- 12.1 第 3 步只 cp 实盘那一份配置（for 循环改成只 cp 实盘路径）
+- 12.2 只建 `vnpy-trade-real.service`，`vnpy-trade-sim.service` 不建
+- 实盘凭证照常 `systemctl set-environment` 注入
+
+**只跑模拟盘**（不要实盘）：
+
+- 12.1 第 2 步只建 `模拟盘simnow` 目录
+- 12.1 第 3 步只 cp 模拟盘那一份，`.vntrader/secrets.yaml` 填 simnow_user / simnow_password
+- 12.2 只建 `vnpy-trade-sim.service`，`vnpy-trade-real.service` 不建
+- 无需 `systemctl set-environment`（simnow 凭证走 secrets.yaml）
+
+其余（clone vnpy-domestic、`pip install -e .`、建 vnpy-data、web 前后端、nginx）不变。monitor.db 只跑一个账户就只有一个账户的数据，web 面板自动显示单账户，顶部「实盘/模拟」切换里空的那个无数据属正常。飞书控制只实盘开：只跑模拟盘时没有飞书控制，但通知（webhook）照常推。
 
 ## 13. nginx 反代
 
@@ -773,11 +819,12 @@ server {
 }
 ```
 
-三个关键点，缺一个都会坏：
+四个关键点，缺一个都会坏：
 
 1. `try_files ... /index.html` —— 前端用 createWebHistory（HTML5 history 路由），直接刷新 `/dashboard`、`/orders` 会 404，这行把找不到的路径回退给 index.html 让前端路由接管。
 2. `location /api/` —— 前端 axios `baseURL` 是空串，请求打同域 `/api/xxx`，靠 nginx 转发到 8000。
 3. `location /ws` 的 `Upgrade`/`Connection "upgrade"` + `http_version 1.1` —— 前端生产模式用 `location.host` 连 `/ws`，缺这些头 WebSocket 握手失败，实时快照不刷新。
+4. **`/home/ubuntu` 目录权限 750 会挡住 nginx** —— Ubuntu 家目录默认 `drwxr-x---`，nginx 的 worker 跑在 www-data 用户下，进不去 `/home/ubuntu`，访问首页报 500（error.log 里 `stat() "/home/ubuntu/web-frontend/dist/index.html" failed (13: Permission denied)`）。启用前先 `sudo chmod 711 /home/ubuntu`（只加执行位让 www-data 能穿过目录，不暴露文件列表）。
 
 启用 + 生效：
 
@@ -845,7 +892,7 @@ sudo certbot --nginx -d 你的域名
 - npm 已配 npmmirror：`npm config set registry https://registry.npmmirror.com`
 - pip 已配腾讯云镜像：`-i https://mirrors.tencentyun.com/pypi/simple`
 - git clone 卡住时：改用 ssh 协议 `git@github.com:...`（配 ssh key），或走 ghproxy 代理前缀
-- Node 下载已配 npmmirror 镜像：`NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node`
+- Node 用 conda 装（conda-forge 提供，npm 随装）；conda-forge 慢时配腾讯云镜像 `conda config --add channels https://mirrors.tencentyun.com/anaconda/cloud/conda-forge/`；不想用 conda 装 Node 时可用 nvm + 清华镜像方案
 
 ---
 
@@ -874,6 +921,7 @@ sudo certbot --nginx -d 你的域名
 21. **MONITOR_DB_PATH 未设静默禁写库**：`RolloverCtaEngine` 里 `if db_path:` 才建 MonitorWriter，不设就整段跳过、无任何报错/提示，前端面板数据为空。排查「前端没实盘数据」先查这个环境变量设没设。
 22. **账户目录缺 secrets.yaml 会 fallback 到源码占位符**：`_load_secrets()` 按 cwd → 源码 → home 查找，账户目录没配 secrets.yaml 就回退到源码目录的 `.example` 占位符（webhook「你的webhook」、app_id「cli_xxx」），导致飞书通知报 `incoming webhook access token invalid`、飞书控制假启动。每个账户目录必须配自己的 secrets.yaml。
 23. **策略状态汇总 window=0 是显示问题**：引擎状态汇总只读 `strategy.bg`（1 分钟 MyBarGenerator），双 BarGenerator 做 N 分钟周期时，`bg_window`（window=N）不被显示，状态里 `window=0` 不代表周期没生效。
+24. **nginx 反代前端 500 = /home/ubuntu 权限 750**：Ubuntu 家目录默认 `drwxr-x---`，nginx 的 www-data 用户进不去，`stat() .../dist/index.html` 报 `Permission denied`、首页 500。启用前先 `sudo chmod 711 /home/ubuntu`（只加执行位让 www-data 穿过，不暴露文件列表）。
 
 ---
 
