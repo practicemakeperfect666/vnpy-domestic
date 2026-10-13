@@ -18,7 +18,7 @@
 
 - **双账户 Web 监控**：实盘 CTP + simnow 模拟盘双账户同时跑，Web 面板合并看，飞书通知分群、控制只对实盘。拆分三模块两库——交易核心 vnpy-domestic + 后端独立包 web-backend + 前端独立项目 web-frontend
 - **MonitorWriter 写库层**：queue + 独立线程异步落库，交易主循环零阻塞；埋点只在 RolloverCtaEngine 现有方法末尾追加，不动核心交易逻辑；SQLite + WAL + busy_timeout 处理双进程并发写
-- **monitor.db 监控库（14 张表）**：orders / trades / positions / accounts / account_positions / account_daily_pnl / daily_pnl / strategy_status / strategy_intraday / logs / system_metrics / klines / trade_rounds / contracts，除 contracts 外全带 account 字段区分 real / simnow，时间统一北京时间字符串
+- **monitor.db 监控库（14 张表）**：orders / trades / positions / accounts / account_positions / account_intraday_pnl / daily_pnl / strategy_status / strategy_intraday / logs / system_metrics / klines / trade_rounds / contracts，除 contracts 外全带 account 字段区分 real / simnow，时间统一北京时间字符串
 - **web-backend 后端**：FastAPI + SQLAlchemy 2.0 只读 monitor.db，18 个 REST 接口 + WebSocket `/ws` 每 3 秒全量快照广播；后端不接 CTP、不碰交易进程，交易挂了照样查历史
 - **web-frontend 前端**：Vue3 + Vite + Element Plus + ECharts + lightweight-charts，纯 JS。策略维度首页（策略卡片）→ 策略详情页（净值 / 回撤 / K线 / 合约信息 / 账户持仓），另有 Dashboard / Orders / Logs；白底现代简洁、红涨绿跌（国内期货习惯）
 - **双账户隔离**：两个独立进程（一份代码靠 `CTP_MODE` 切配置），`.vntrader` 按 cwd 隔离，monitor.db 靠 `MONITOR_DB_PATH` 固定绝对路径共享；实盘凭证全走环境变量不落盘、simnow 走 secrets.yaml
@@ -443,6 +443,15 @@ npm run dev        # http://localhost:5173，/api /ws 已代理到 8000
 
 前端已装好 node_modules；`npm run build` 出 dist 交 nginx（服务器不装 node，本机 build 后 scp 上去）。
 
+### 数据清理
+
+monitor.db 快照表（accounts / strategy_status / account_positions / account_intraday_pnl / system_metrics）每 3s 一条会持续膨胀。用 `scripts/cleanup_monitor.py` 定期清理——删 10 天前、保留每 key 最新一条（实时面板不丢状态）。事件表（orders / trades / trade_rounds）、日频表（daily_pnl / strategy_intraday）、基础表（klines / contracts / logs）永久保留；每次清理写一条日志进 logs 表留痕。
+
+```bash
+python scripts/cleanup_monitor.py            # 默认删 10 天前
+python scripts/cleanup_monitor.py --vacuum   # 删完回收空间（需交易进程停止）
+```
+
 完整方案 / 前端开发 / 运行部署说明见 `web端监控使用手册.md`。
 
 ---
@@ -481,10 +490,13 @@ vnpy-domestic/
 │   └── RolloverCtaEngine/
 │       └── RolloverCtaEngine.py        ← 自动换月 + 通知 + P&L + 断连监控
 │
-└── strategies/
-    ├── corn_scalper.py                 ← 玉米刷盘口策略
-    ├── corn_scalper.md                 ← 策略详细文档
-    └── dual_ma.py                      ← 双均线策略
+├── strategies/
+│   ├── corn_scalper.py                 ← 玉米刷盘口策略
+│   ├── corn_scalper.md                 ← 策略详细文档
+│   └── dual_ma.py                      ← 双均线策略
+│
+└── scripts/
+    └── cleanup_monitor.py              ← monitor.db 快照清理（删 10 天前保留最新）
 ```
 
 ---

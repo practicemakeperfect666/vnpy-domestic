@@ -30,11 +30,31 @@ class MonitorWriter:
             conn.exec_driver_sql("PRAGMA journal_mode=WAL")
             conn.exec_driver_sql("PRAGMA busy_timeout=5000")
         Base.metadata.create_all(self.engine)
+        self._migrate()
 
         self._queue: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+
+    def _migrate(self) -> None:
+        """Migrate existing tables (create_all does not alter existing): add
+        queue/cancel delay cols, drop legacy delay_ms. The legacy delay_ms is
+        NOT NULL in old schemas; once the model stops writing it, every INSERT
+        fails the NOT NULL constraint, so it must be dropped."""
+        with self.engine.begin() as conn:
+            cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(orders)")}
+            for col in ("queue_delay_ms", "cancel_delay_ms"):
+                if col not in cols:
+                    conn.exec_driver_sql(
+                        f"ALTER TABLE orders ADD COLUMN {col} FLOAT DEFAULT 0"
+                    )
+            if "delay_ms" in cols:
+                conn.exec_driver_sql("ALTER TABLE orders DROP COLUMN delay_ms")
+
+            tcols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(trades)")}
+            if "delay_ms" in tcols:
+                conn.exec_driver_sql("ALTER TABLE trades DROP COLUMN delay_ms")
 
     def write(self, obj) -> None:
         """Enqueue a model instance; never blocks the caller."""

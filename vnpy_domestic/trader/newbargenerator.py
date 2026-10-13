@@ -268,8 +268,7 @@ class MyBarGenerator(_BarGenerator):
             self.bar.datetime = tick.datetime
 
         if self.last_tick and self.bar:
-            gap = (tick.datetime - self.last_tick.datetime).total_seconds()
-            if gap > 7200:
+            if tick.volume < self.last_tick.volume:
                 self.last_tick = None
 
         if self.bar:

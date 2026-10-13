@@ -8,7 +8,7 @@ together.
 
 from .models import (
     Account,
-    AccountDailyPnl,
+    AccountIntradayPnl,
     AccountPosition,
     Base,
     Contract,
@@ -27,7 +27,7 @@ from .writer import MonitorWriter
 
 __all__ = [
     "Account",
-    "AccountDailyPnl",
+    "AccountIntradayPnl",
     "AccountPosition",
     "Base",
     "Contract",

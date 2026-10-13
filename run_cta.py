@@ -8,11 +8,17 @@ import time as time_mod
 from datetime import datetime
 from datetime import time as dtime
 from time import sleep
+from pathlib import Path
 
-# Ensure datetime.now() returns Beijing time (server may run UTC)
-os.environ.setdefault("TZ", "Asia/Shanghai")
-if hasattr(time_mod, "tzset"):
-    time_mod.tzset()
+import yaml
+
+# Ensure datetime.now() returns Beijing time (server may run UTC).
+# Windows C runtime can't parse IANA names like "Asia/Shanghai" and falls back
+# to UTC (8h behind), breaking check_trading_period(); system tz is already CST.
+if sys.platform != "win32":
+    os.environ.setdefault("TZ", "Asia/Shanghai")
+    if hasattr(time_mod, "tzset"):
+        time_mod.tzset()
 
 from vnpy.event import EventEngine
 from vnpy.trader.engine import MainEngine
@@ -69,15 +75,34 @@ def check_trading_period() -> bool:
     return (DAY_START <= t <= DAY_END) or (NIGHT_START <= t <= NIGHT_END)
 
 
+def _load_secrets() -> dict:
+    """读 secrets.yaml（simnow 凭证 / 飞书 webhook），按 cwd → 源码 → home 顺序查找"""
+    paths = [
+        Path.cwd() / ".vntrader" / "secrets.yaml",
+        Path(__file__).resolve().parent / ".vntrader" / "secrets.yaml",
+        Path.home() / ".vntrader" / "secrets.yaml",
+    ]
+    for p in paths:
+        if p.exists():
+            try:
+                with open(p, encoding="utf-8") as f:
+                    return yaml.safe_load(f) or {}
+            except Exception:
+                pass
+    return {}
+
+
 def load_ctp_setting() -> dict:
-    """加载 CTP 配置：按 CTP_MODE 分支（simnow 硬编码，实盘全走环境变量不落盘）"""
+    """加载 CTP 配置：simnow 凭证读 secrets.yaml，实盘全走环境变量（不落盘）"""
     mode = os.getenv("CTP_MODE", "real")
-    username = os.getenv("CTP_USER")
-    password = os.getenv("CTP_PASSWORD")
-    if not username or not password:
-        return {}
 
     if mode == "simnow":
+        # simnow 凭证写在账户目录 .vntrader/secrets.yaml（虚拟资金，不敏感）
+        secrets = _load_secrets()
+        username = secrets.get("simnow_user", "")
+        password = secrets.get("simnow_password", "")
+        if not username or not password:
+            return {}
         return {
             "用户名": username,
             "密码": password,
@@ -90,6 +115,10 @@ def load_ctp_setting() -> dict:
         }
 
     # 实盘：凭证与服务器信息全走环境变量，代码里不留真实信息
+    username = os.getenv("CTP_USER")
+    password = os.getenv("CTP_PASSWORD")
+    if not username or not password:
+        return {}
     return {
         "用户名": username,
         "密码": password,
@@ -197,6 +226,13 @@ def run_child(child_conn=None) -> None:
     logger.info("每日收盘归零累计盈亏...")
     cta_engine.reset_daily_pl()
 
+    # 只在日盘收盘后（15:00 后、夜盘开盘前）标记挂单失效；
+    # 夜盘是次日交易日的开始，夜盘挂单保留到次日日盘 15:00 收盘才失效
+    now = datetime.now().time()
+    if DAY_END <= now < NIGHT_START:
+        logger.info("标记未成交挂单失效...")
+        cta_engine._mark_stale_orders()
+
     logger.info("停止所有策略...")
     cta_engine.stop_all_strategies()
     notify.send_shutdown_notification()
@@ -214,15 +250,25 @@ def run_parent() -> None:
     print("策略配置将由CTA引擎自动加载")
     print("=" * 60, flush=True)
 
-    # 启动时确认 CTP 凭证存在（环境变量）
-    ctp_user = os.getenv("CTP_USER", "")
-    ctp_pass = os.getenv("CTP_PASSWORD", "")
-    if not ctp_user or not ctp_pass:
-        print("❌ 请设置环境变量 CTP_USER 和 CTP_PASSWORD")
-        print("   export CTP_USER=your_account")
-        print("   export CTP_PASSWORD=your_password", flush=True)
-        sys.exit(1)
-    print(f"CTP 凭证已就绪 (用户名: {ctp_user})", flush=True)
+    # 启动时确认 CTP 凭证存在（simnow 读 secrets.yaml，实盘读环境变量）
+    mode = os.getenv("CTP_MODE", "real")
+    if mode == "simnow":
+        secrets = _load_secrets()
+        username = secrets.get("simnow_user", "")
+        password = secrets.get("simnow_password", "")
+        if not username or not password:
+            print("❌ 请在 .vntrader/secrets.yaml 填写 simnow_user / simnow_password")
+            sys.exit(1)
+        print(f"CTP 凭证已就绪 (simnow 用户名: {username})", flush=True)
+    else:
+        ctp_user = os.getenv("CTP_USER", "")
+        ctp_pass = os.getenv("CTP_PASSWORD", "")
+        if not ctp_user or not ctp_pass:
+            print("❌ 请设置环境变量 CTP_USER 和 CTP_PASSWORD")
+            print("   export CTP_USER=your_account")
+            print("   export CTP_PASSWORD=your_password", flush=True)
+            sys.exit(1)
+        print(f"CTP 凭证已就绪 (用户名: {ctp_user})", flush=True)
 
     # 更新交易时段数据
     print("\n📅 正在更新交易时段数据...")

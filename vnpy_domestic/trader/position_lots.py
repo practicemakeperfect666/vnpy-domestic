@@ -29,6 +29,7 @@ def settle_close(
     today: str,
     close_price: float,
     direction_mult: float,
+    prev_settle: float = None,
     is_limit: bool = False,
     with_details: bool = False,
 ):
@@ -39,6 +40,11 @@ def settle_close(
 
     lots: list of [volume, price, trading_day, open_datetime?]（可变批次，开仓时间序；第4项可选）
     direction_mult: 卖平多=1，买平空=-1
+
+    prev_settle: 隔日仓的逐日盯市成本基准（昨结算价）。None 时全部按开仓价算
+    （累计盈亏口径）。传入时：返回的 pl 用逐日盯市口径（隔日仓=close-昨结算、
+    当日仓=close-开仓价）；details 里的 pair_pl 始终是开仓价口径（供 trade_rounds
+    交易绩效统计）。
     """
     ex = (exchange.value if hasattr(exchange, "value") else str(exchange)).upper()
     n = len(lots)
@@ -69,10 +75,13 @@ def settle_close(
         vol, price, _day = b[0], b[1], b[2]
         open_dt = b[3] if len(b) > 3 else None
         take = min(vol, remaining)
-        pair_pl = (close_price - price) * take * direction_mult
+        # 逐日盯市：隔日仓成本=昨结算价(prev_settle)，当日仓=开仓价
+        cost = prev_settle if (prev_settle and _day < today) else price
+        pair_pl = (close_price - cost) * take * direction_mult
+        pair_open_pl = (close_price - price) * take * direction_mult
         pl += pair_pl
         if with_details:
-            details.append((take, price, _day, pair_pl, open_dt))
+            details.append((take, price, _day, pair_open_pl, open_dt))
         remaining -= take
         lots[i][0] = vol - take
     lots[:] = [b for b in lots if b[0] > 0]

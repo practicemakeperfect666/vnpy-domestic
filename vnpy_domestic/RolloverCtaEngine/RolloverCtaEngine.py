@@ -23,7 +23,7 @@ from vnpy_domestic.trader.position_lots import settle_close, trading_day
 
 from vnpy_domestic.monitor import (
     Account as MonitorAccount,
-    AccountDailyPnl as MonitorAccountDailyPnl,
+    AccountIntradayPnl as MonitorAccountIntradayPnl,
     AccountPosition as MonitorAccountPosition,
     Contract as MonitorContract,
     DailyPnl as MonitorDailyPnl,
@@ -89,8 +89,11 @@ class RolloverCtaEngine(CtaEngine):
         # 设置日志回调
         self.notify.set_log_callback(self.write_log)
 
-        # 发单时间跟踪（用于成交延迟监控）
-        self.order_submit_times: dict[str, datetime] = {}
+        # 发单/撤单指令时刻 + 延迟缓存（用于延迟监控）
+        self.order_send_times: dict[str, datetime] = {}   # 发单指令时刻
+        self.order_cancel_times: dict[str, datetime] = {}  # 撤单指令时刻
+        self.order_queue_delay: dict[str, float] = {}      # 报单→入队延迟(ms)
+        self.order_cancel_delay: dict[str, float] = {}     # 撤单→撤单终态延迟(ms)
 
         # 定时监控相关
         self.last_monitor_time: float = 0.0
@@ -105,9 +108,8 @@ class RolloverCtaEngine(CtaEngine):
         # 订单缓存（用于滑点计算）
         self.orders: dict = {}
 
-        # 每日订单状态统计（挂撤单/未成交等）
-        self._daily_order_counts: dict = {}
-        self._daily_order_ids: set = set()  # 当天唯一订单号（"共N笔"去重用）
+        # 每日订单状态统计（挂撤单/未成交等；按唯一订单号记最新状态）
+        self._daily_order_status: dict = {}  # vt_orderid -> 最新 status value
         self._order_stat_date: str = ""
 
         # NOTTRADED 通知去重（避免 CTP 重复推送刷屏）
@@ -139,9 +141,10 @@ class RolloverCtaEngine(CtaEngine):
             self.monitor = MonitorWriter(db_path)
         self.account = os.getenv("CTP_MODE", "real")
 
-        # ── 高频快照缓存（3s 浮动盈亏/保证金计算用） ──
+        # ── 快照缓存（浮动盈亏/保证金计算用） ──
         self.last_prices: dict = {}  # vt_symbol -> last_price
         self._last_snapshot_time: float = 0.0
+        self.snapshot_interval: int = 3  # 快照间隔（秒）
         self._accountid: str = ""
         self._last_balance: float = 0.0
         self._last_available: float = 0.0
@@ -149,6 +152,7 @@ class RolloverCtaEngine(CtaEngine):
         self._today_realized_pl: float = 0.0
         self._today_trading_day: str = ""
         self._last_intraday_time: float = 0.0
+        psutil.cpu_percent(interval=None)  # 建立 CPU 采样基线，快照用非阻塞采样
 
     # ----------------------------------------------------------------------
     # write_log 重写：日志写文件 + 错误级日志推手机
@@ -466,20 +470,6 @@ class RolloverCtaEngine(CtaEngine):
         self._last_balance = data.balance
         self._last_available = getattr(data, "available", data.balance - data.frozen)
         self._last_frozen = data.frozen
-        monitor = getattr(self, "monitor", None)
-        if monitor:
-            monitor.write(
-                MonitorAccount(
-                    account=getattr(self, "account", "real"),
-                    accountid=data.accountid,
-                    balance=data.balance,
-                    available=self._last_available,
-                    frozen=data.frozen,
-                    margin=0.0,  # 保证金由 3s 快照从持仓计算
-                    pnl=0.0,  # 盈亏由 3s 快照从持仓计算
-                    snapshot_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                )
-            )
         if self.disconnect_alerted:
             self.disconnect_alerted = False
             self.notify.send_text(
@@ -488,22 +478,20 @@ class RolloverCtaEngine(CtaEngine):
             self.write_log("CTP 连接已恢复")
 
     def process_tick_event(self, event: Event) -> None:
-        """重写：缓存最新价（3s 快照的浮动盈亏计算用）"""
+        """重写：缓存最新价（快照的浮动盈亏计算用）"""
         super().process_tick_event(event)
         tick = event.data
         if tick.last_price:
             self.last_prices[normalize_vt_symbol(tick.vt_symbol)] = tick.last_price
 
     def _snapshot_realtime(self) -> None:
-        """每 3s 快照：账户（含保证金/浮动盈亏，从持仓 + 最新价计算）"""
+        """定时快照：策略状态 + 账户持仓/资金（保证金/浮动盈亏用 CTP 持仓）"""
         monitor = getattr(self, "monitor", None)
         if not monitor:
             return
         account = getattr(self, "account", "real")
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        total_margin = 0.0
-        total_pnl = 0.0
         intraday = time.time() - self._last_intraday_time >= 900
         if intraday:
             self._last_intraday_time = time.time()
@@ -515,8 +503,6 @@ class RolloverCtaEngine(CtaEngine):
             pnl = 0.0
             if strategy.pos and last is not None and avg_price and size:
                 pnl = round((last - avg_price) * strategy.pos * size, 2)
-                total_pnl += pnl
-                total_margin += abs(strategy.pos) * avg_price * size * 0.08
             monitor.write(
                 MonitorStrategyStatus(
                     strategy=name,
@@ -548,18 +534,18 @@ class RolloverCtaEngine(CtaEngine):
                     )
                 )
 
+        # 系统指标（3s 刷新，cpu 非阻塞采样）
+        uptime_seconds = int(time.time() - psutil.boot_time())
         monitor.write(
-            MonitorAccount(
-                account=account,
-                accountid=self._accountid,
-                balance=self._last_balance,
-                available=self._last_available,
-                frozen=self._last_frozen,
-                margin=round(total_margin, 2),
-                pnl=round(total_pnl, 2),
-                snapshot_time=now,
+            MonitorSystemMetric(
+                ts=now,
+                cpu=psutil.cpu_percent(interval=None),
+                mem=psutil.virtual_memory().percent,
+                disk=psutil.disk_usage("/").percent,
+                uptime=f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m",
             )
         )
+
         self._write_account_positions()
 
     def _write_account_positions(self) -> None:
@@ -571,17 +557,29 @@ class RolloverCtaEngine(CtaEngine):
         account = getattr(self, "account", "real")
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         floating_pl = 0.0
+        total_margin = 0.0
         for pos in self.main_engine.get_all_positions():
             floating_pl += pos.pnl
             if not pos.volume:
                 continue
+            # 净持仓交易所（DCE/CZCE/GFEX）CTP 返回 direction=NET、volume 可负，
+            # 拆成多/空让前端能显示方向与正手数
+            if pos.direction == Direction.NET:
+                direction = "LONG" if pos.volume > 0 else "SHORT"
+                volume = abs(pos.volume)
+            else:
+                direction = pos.direction.name
+                volume = pos.volume
+            contract = self.main_engine.get_contract(pos.vt_symbol)
+            size = contract.size if contract else 0
+            total_margin += volume * pos.price * size * 0.08
             monitor.write(
                 MonitorAccountPosition(
                     account=account,
                     accountid=self._accountid,
                     vt_symbol=pos.vt_symbol,
-                    direction=pos.direction.value,
-                    volume=pos.volume,
+                    direction=direction,
+                    volume=volume,
                     price=round(pos.price, 2),
                     pnl=round(pos.pnl, 2),
                     snapshot_time=now,
@@ -592,7 +590,7 @@ class RolloverCtaEngine(CtaEngine):
             self._today_trading_day = today
             self._today_realized_pl = 0.0
         monitor.write(
-            MonitorAccountDailyPnl(
+            MonitorAccountIntradayPnl(
                 account=account,
                 accountid=self._accountid,
                 trading_day=today,
@@ -602,8 +600,36 @@ class RolloverCtaEngine(CtaEngine):
                 snapshot_time=now,
             )
         )
+        monitor.write(
+            MonitorAccount(
+                account=account,
+                accountid=self._accountid,
+                balance=self._last_balance,
+                available=self._last_available,
+                frozen=self._last_frozen,
+                margin=round(total_margin, 2),
+                pnl=round(floating_pl, 2),
+                snapshot_time=now,
+            )
+        )
 
     # ----------------------------------------------------------------------
+    # 发单/撤单打点（override 基类，记录指令发出时刻用于延迟监控）
+    def send_order(
+        self, strategy, direction, offset, price, volume, stop, lock, net
+    ) -> list:
+        send_time = datetime.now()
+        vt_orderids = super().send_order(
+            strategy, direction, offset, price, volume, stop, lock, net
+        )
+        for vid in vt_orderids or []:
+            self.order_send_times[vid] = send_time
+        return vt_orderids
+
+    def cancel_order(self, strategy, vt_orderid: str) -> None:
+        self.order_cancel_times[vt_orderid] = datetime.now()
+        super().cancel_order(strategy, vt_orderid)
+
     # 订单 / 成交事件（通知 + 监控写库）
     # ----------------------------------------------------------------------
     def process_order_event(self, event: Event) -> None:
@@ -620,26 +646,30 @@ class RolloverCtaEngine(CtaEngine):
 
         strategy_name = strategy.strategy_name
 
-        # ── 每日订单状态统计（"总计"按唯一订单号去重，见 get_daily_order_stats）──
-        status_key: str = order.status.value
-        self._daily_order_ids.add(order.vt_orderid)
-        self._daily_order_counts[status_key] = (
-            self._daily_order_counts.get(status_key, 0) + 1
-        )
+        # ── 每日订单状态统计（每单只记最新状态，见 get_daily_order_stats）──
+        self._daily_order_status[order.vt_orderid] = order.status.value
 
-        # ── 记录发单时间（首次出现时） ──
-        if order.vt_orderid not in self.order_submit_times:
-            self.order_submit_times[order.vt_orderid] = datetime.now()
+        # ── 延迟：报单→入队 / 撤单→撤单终态（首次到达对应状态时计算并缓存） ──
+        # 入队延迟 = 发单 → 网关首次回报。立即成交的单直接 ALLTRADED、不经过
+        # NOTTRADED，故以"非 SUBMITTING"作为入队标志，而非 NOTTRADED。
+        if order.vt_orderid not in self.order_queue_delay and order.status != Status.SUBMITTING:
+            send_time = self.order_send_times.get(order.vt_orderid)
+            self.order_queue_delay[order.vt_orderid] = (
+                round((datetime.now() - send_time).total_seconds() * 1000, 0)
+                if send_time
+                else 0.0
+            )
+        if order.status == Status.CANCELLED and order.vt_orderid not in self.order_cancel_delay:
+            cancel_time = self.order_cancel_times.get(order.vt_orderid)
+            self.order_cancel_delay[order.vt_orderid] = (
+                round((datetime.now() - cancel_time).total_seconds() * 1000, 0)
+                if cancel_time
+                else 0.0
+            )
 
         # ── 监控写库：订单 ──
         monitor = getattr(self, "monitor", None)
         if monitor:
-            submit = self.order_submit_times.get(order.vt_orderid)
-            delay_ms = (
-                round((datetime.now() - submit).total_seconds() * 1000, 0)
-                if submit
-                else 0.0
-            )
             monitor.write(
                 MonitorOrder(
                     vt_orderid=order.vt_orderid,
@@ -654,7 +684,8 @@ class RolloverCtaEngine(CtaEngine):
                     traded=order.traded,
                     status=order.status.name,
                     submit_time=str(order.datetime),
-                    delay_ms=delay_ms,
+                    queue_delay_ms=self.order_queue_delay.get(order.vt_orderid, 0.0),
+                    cancel_delay_ms=self.order_cancel_delay.get(order.vt_orderid, 0.0),
                 )
             )
 
@@ -696,7 +727,9 @@ class RolloverCtaEngine(CtaEngine):
                         est_pl = (
                             (order.price - avg_price) * order.volume * direction_mult
                         )
-                        notify_text += f"\n  预估盈亏: {est_pl:+.2f} 点"
+                        contract = self.main_engine.get_contract(order.vt_symbol)
+                        size = contract.size if contract else 0
+                        notify_text += f"\n  预估盈亏: {est_pl * size:+.2f} 元"
                 self.notify.send_text(notify_text)
         elif order.status == Status.CANCELLED:
             self.notify.send_text(
@@ -754,18 +787,9 @@ class RolloverCtaEngine(CtaEngine):
             else:
                 slippage = order.price - trade.price
 
-        # ── 延迟计算（所有订单统一统计：成交时间 - 发单时间） ──
-        delay_ms = 0.0
-        if order:
-            submit_time = self.order_submit_times.get(trade.vt_orderid)
-            if submit_time and trade.datetime:
-                td = trade.datetime
-                if td.tzinfo is not None:
-                    td = td.astimezone().replace(tzinfo=None)  # → local naive
-                delay_ms = (td - submit_time).total_seconds() * 1000
-
         # ── P&L 追踪（批次队列按交易所规则匹配；锁仓策略多空分记跳过由策略自算） ──
         pl = 0.0
+        pl_amount = 0.0
         is_locked = hasattr(strategy, "long_pos") and hasattr(strategy, "short_pos")
         if not is_locked:
             if trade.offset == Offset.OPEN:
@@ -783,6 +807,17 @@ class RolloverCtaEngine(CtaEngine):
                 if lots:
                     direction_mult = 1 if trade.direction == Direction.SHORT else -1
                     today = trading_day(trade.datetime)
+                    # 逐日盯市：隔日仓平仓成本基准 = CTP 持仓成本价(对隔日仓=昨结算价)
+                    prev_settle = None
+                    hold_direction = (
+                        Direction.LONG if direction_mult == 1 else Direction.SHORT
+                    )
+                    for pos in self.main_engine.get_all_positions():
+                        if pos.vt_symbol != trade.vt_symbol:
+                            continue
+                        if pos.direction in (Direction.NET, hold_direction) and pos.yd_volume > 0:
+                            prev_settle = pos.price
+                            break
                     pl, details = settle_close(
                         lots,
                         trade.exchange,
@@ -791,12 +826,17 @@ class RolloverCtaEngine(CtaEngine):
                         today,
                         trade.price,
                         direction_mult,
+                        prev_settle=prev_settle,
                         with_details=True,
                     )
+                    # 点·手 → 元（乘合约乘数 size），与浮动盈亏/账户权益口径对齐
+                    contract = self.main_engine.get_contract(trade.vt_symbol)
+                    size = contract.size if contract else 0
+                    pl_amount = pl * size
                     self.strategy_cumulative_pl[strategy_name] = (
-                        self.strategy_cumulative_pl.get(strategy_name, 0) + pl
+                        self.strategy_cumulative_pl.get(strategy_name, 0) + pl_amount
                     )
-                    self._today_realized_pl += pl
+                    self._today_realized_pl += pl_amount
 
                     # ── 监控写库：平仓配对 trade_rounds ──
                     monitor = getattr(self, "monitor", None)
@@ -823,7 +863,7 @@ class RolloverCtaEngine(CtaEngine):
                                     entry_price=round(entry_price, 2),
                                     exit_price=round(trade.price, 2),
                                     volume=vol,
-                                    pnl=round(pair_pl, 2),
+                                    pnl=round(pair_pl * size, 2),
                                     holding_seconds=holding,
                                     open_time=str(_day),
                                     close_time=str(close_dt) if close_dt else "",
@@ -832,12 +872,12 @@ class RolloverCtaEngine(CtaEngine):
                             )
 
         # ── 本地日志 ──
-        if slippage != 0 or delay_ms > 0:
+        if slippage != 0:
             self.write_log(
                 f"成交 {strategy_name} {trade.symbol} "
                 f"{trade.direction.value} vol={trade.volume} "
                 f"price={trade.price:.2f} "
-                f"slippage={slippage:+.2f} delay={delay_ms:.0f}ms"
+                f"slippage={slippage:+.2f}"
             )
 
         self.call_strategy_func(strategy, strategy.on_trade, trade)
@@ -876,11 +916,11 @@ class RolloverCtaEngine(CtaEngine):
                 if lock_cum:
                     notify_text += f"\n  累计盈亏: {lock_cum:+.2f} 点"
             else:
-                if pl != 0:
-                    notify_text += f"\n  本次盈亏: {pl:+.2f} 点"
+                if pl_amount != 0:
+                    notify_text += f"\n  本次盈亏: {pl_amount:+.2f} 元"
                 cum_pl = self.strategy_cumulative_pl.get(strategy_name)
                 if cum_pl:
-                    notify_text += f"\n  累计盈亏: {cum_pl:+.2f} 点"
+                    notify_text += f"\n  累计盈亏: {cum_pl:+.2f} 元"
             self.notify.send_text(notify_text)
 
         self.sync_strategy_data(strategy)
@@ -899,7 +939,6 @@ class RolloverCtaEngine(CtaEngine):
                     price=trade.price,
                     volume=trade.volume,
                     slippage=round(slippage, 2),
-                    delay_ms=round(delay_ms, 0),
                     trade_time=str(trade.datetime),
                 )
             )
@@ -928,8 +967,8 @@ class RolloverCtaEngine(CtaEngine):
                 f"CTP 连接异常告警：{int(current_time - self.last_activity_time)}s 无活动"
             )
 
-        # ── 3s 高频快照：账户 + 持仓浮动盈亏 ──
-        if current_time - self._last_snapshot_time >= 3:
+        # ── 快照：账户 + 持仓浮动盈亏 ──
+        if current_time - self._last_snapshot_time >= self.snapshot_interval:
             self._last_snapshot_time = current_time
             self._snapshot_realtime()
 
@@ -938,22 +977,12 @@ class RolloverCtaEngine(CtaEngine):
             return
         self.last_monitor_time = current_time
 
-        # ── 监控写库：系统指标 + K线/合约（策略状态已移至 3s 快照）──
+        # ── 监控写库：K线/合约（策略状态 + 系统指标已移至快照）──
         monitor = getattr(self, "monitor", None)
         if monitor:
             for name, s in self.strategies.items():
                 self._attach_kline_writer(s)
                 self._write_contract(s.vt_symbol)
-            uptime_seconds = int(time.time() - psutil.boot_time())
-            monitor.write(
-                MonitorSystemMetric(
-                    ts=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    cpu=psutil.cpu_percent(interval=1),
-                    mem=psutil.virtual_memory().percent,
-                    disk=psutil.disk_usage("/").percent,
-                    uptime=f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m",
-                )
-            )
 
         messages = []
         for strategy_name, strategy in self.strategies.items():
@@ -1047,34 +1076,33 @@ class RolloverCtaEngine(CtaEngine):
             self.notify.send_status_summary(batch, total, idx, seq=self._status_seq)
 
     def send_daily_pl_summary(self) -> None:
-        """收盘退出前发送当日盈亏汇总（已实现盈亏，点·手 × 合约乘数 = 金额）"""
+        """收盘退出前发送当日盈亏汇总（已实现盈亏，元）"""
         lines = []
         total = 0.0
         for name, strategy in self.strategies.items():
             is_locked = hasattr(strategy, "long_pos") and hasattr(strategy, "short_pos")
             if is_locked:
+                # 锁仓策略 realized_pl 为策略自算的"点·手"，乘 size 转元
                 pl_pts = getattr(strategy, "realized_pl", 0) or 0
                 long_pos = getattr(strategy, "long_pos", 0) or 0
                 short_pos = getattr(strategy, "short_pos", 0) or 0
                 pos_str = f"多{long_pos}/空{short_pos}"
                 if pl_pts == 0 and long_pos == 0 and short_pos == 0:
                     continue
+                contract = self.main_engine.get_contract(strategy.vt_symbol)
+                size = contract.size if contract else 0
+                pl_amount = pl_pts * size
             else:
-                pl_pts = self.strategy_cumulative_pl.get(name, 0) or 0
+                # 非锁仓 strategy_cumulative_pl 已在平仓累加时乘 size，直接是元
+                pl_amount = self.strategy_cumulative_pl.get(name, 0) or 0
                 pos_str = f"{strategy.pos:+d}"
-                if pl_pts == 0 and strategy.pos == 0:
+                if pl_amount == 0 and strategy.pos == 0:
                     continue
 
-            contract = self.main_engine.get_contract(strategy.vt_symbol)
-            size = contract.size if contract else 0
-            if size > 0:
-                total += pl_pts * size
-                pl_str = f"{pl_pts * size:+.2f} 元"
-            else:
-                pl_str = f"{pl_pts:+.2f} 点·手"
+            total += pl_amount
             lines.append(
                 f"  {name}  {strategy.vt_symbol}\n"
-                f"    已实现: {pl_str} | 持仓: {pos_str}"
+                f"    已实现: {pl_amount:+.2f} 元 | 持仓: {pos_str}"
             )
 
         sep = "─" * 30
@@ -1087,6 +1115,23 @@ class RolloverCtaEngine(CtaEngine):
                 + f"\n{sep}\n  合计已实现: {total:+.2f} 元"
             )
         self.notify.send_text(text)
+
+    def _mark_stale_orders(self) -> None:
+        """收盘退出前，把未成交挂单标记为已撤销（交易所收盘后挂单自动失效）"""
+        monitor = getattr(self, "monitor", None)
+        if not monitor:
+            return
+        try:
+            with monitor.engine.begin() as conn:
+                result = conn.exec_driver_sql(
+                    "UPDATE orders SET status='CANCELLED' "
+                    "WHERE status='SUBMITTING' AND traded=0"
+                )
+                n = result.rowcount
+            if n:
+                self.write_log(f"日盘收盘：{n} 个未成交挂单标记为已撤销")
+        except Exception as e:
+            self.write_log(f"标记挂单失效失败: {e}")
 
     def reset_daily_pl(self) -> None:
         """每日收盘归零累计盈亏：次日从 0 起统计当日盈亏（隔夜持仓按逐日盯市已结算，不影响）"""
@@ -1284,8 +1329,14 @@ class RolloverCtaEngine(CtaEngine):
         self._rollover_init_results.clear()
 
     def _cleanup_order_cache(self, vt_orderid: str) -> None:
-        """订单终结后清理缓存，防内存泄漏（全部成交/撤单/拒单时调用）"""
-        self.order_submit_times.pop(vt_orderid, None)
+        """订单终结后清理缓存，防内存泄漏（全部成交/撤单/拒单时调用）。
+
+        order_queue_delay / order_cancel_delay 保留不清理：ALLTRADED 订单的
+        状态行写库可能晚于成交事件清理，入队延迟需跨状态读取（每单仅两个
+        float，长期累积内存可忽略）。
+        """
+        self.order_send_times.pop(vt_orderid, None)
+        self.order_cancel_times.pop(vt_orderid, None)
         self.orders.pop(vt_orderid, None)
         self._notified_nottraded.discard(vt_orderid)
 
@@ -1293,9 +1344,10 @@ class RolloverCtaEngine(CtaEngine):
         """返回每日订单状态统计，跨自然日自动清零（"总计"=唯一订单数）"""
         today = datetime.now().strftime("%Y%m%d")
         if self._order_stat_date != today:
-            self._daily_order_counts.clear()
-            self._daily_order_ids.clear()
+            self._daily_order_status.clear()
             self._order_stat_date = today
-        result = dict(self._daily_order_counts)
-        result["总计"] = len(self._daily_order_ids)
+        result: dict = {}
+        for status in self._daily_order_status.values():
+            result[status] = result.get(status, 0) + 1
+        result["总计"] = len(self._daily_order_status)
         return result

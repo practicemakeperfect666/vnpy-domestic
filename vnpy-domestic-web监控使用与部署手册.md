@@ -1,9 +1,12 @@
-# Web 端监控使用手册
+# vnpy-domestic Web 监控 · 使用与部署手册
 
-> 整合自《双账户Web监控方案》《Web前端开发》《运行指导》三份历史文档，并按实际落地代码（14 张表 / 18 个接口 / 5 个视图）校正，补入进程分配说明。
+> 整合《Web 端监控使用手册》与《Web 监控部署指南》两份文档，按实际落地代码校正。
+> 分两部分：**Windows 本地开发使用**、**Linux 从 GitHub clone 部署**。
 > 最后更新：2026-10
 
 ---
+
+# 第一部分 · Windows 本地开发使用
 
 ## 1. 项目概述
 
@@ -26,8 +29,6 @@ vnpy-domestic 是面向国内期货实盘的 vnpy 增强工具包，不修改 vn
 | 实盘无人值守，出问题不知道 | 钉钉/飞书推送 + 策略汇总 |
 | 非交易时段空跑浪费资源 | 守护进程按交易时段自动启停 |
 | 实盘/模拟盘分开跑，看盘要开多个终端 | Web 面板双账户合并展示 |
-
----
 
 ## 2. 总体架构与进程分配
 
@@ -94,8 +95,6 @@ nginx（部署后）：:443 唯一公网入口，静态 + 反代 8000
 
 6. **生命周期解耦**：飞书「停止」→ 交易子进程退出 → monitor.db 停更 → web 面板数据停在停止时刻（历史仍可查）；「重启」→ 新子进程 → 恢复写库 → web 恢复实时。web 前后端全程不受影响。
 
----
-
 ## 3. 双账户隔离
 
 ### 3.1 为什么必须两个进程（合约覆盖坑）
@@ -116,7 +115,7 @@ def process_contract_event(self, event):
 
 **不复制代码**。`run_cta.py` 一份，靠环境变量 `CTP_MODE` 切配置：
 
-- `CTP_MODE=simnow`：账号密码走环境变量 `CTP_USER`/`CTP_PASSWORD`，经纪商 9999、服务器 182.254.243.31:30003/30013、产品名、授权码硬编码
+- `CTP_MODE=simnow`：账号密码读 `secrets.yaml`（simnow_user / simnow_password），经纪商 9999、服务器 182.254.243.31:30003/30013、产品名、授权码硬编码
 - `CTP_MODE=real`：7 个凭证全走环境变量（用户名/密码/brokerID/交易服务器/行情服务器/产品名/授权编码），代码里不留真实信息
 
 ### 3.3 数据隔离（两个工作目录）
@@ -129,7 +128,7 @@ vnpy 的 `.vntrader` 数据目录按「当前工作目录」解析（cwd 下有 
 | .vntrader/database.db、cta_strategy_data.json | 独立 | 独立 | 两个 WorkingDirectory 隔离 |
 | 日志文件 | 独立 | 独立 | log_real / log_sim 前缀 |
 | monitor.db（监控） | 共享 | 共享 | 同一个库，表带 account 字段 |
-| secrets.yaml | 同 | 同 | 共享（含 simnow 密码） |
+| secrets.yaml | 独立 | 独立 | 各账户目录一份（`_load_secrets()` 按 cwd → 源码 → home 查找，cwd 优先；模拟盘目录放 simnow 密码） |
 | 飞书控制 3000 | 开 | 不开 | CTP_MODE 判断 |
 
 **monitor.db 为什么用固定绝对路径**：单账户时 `get_file_path("monitor.db")` 跟着 cwd 解析到同一文件，天然共享；双账户两个进程 cwd 不同，会解析成两个文件、各写各的。所以 monitor.db 是唯一脱离 cwd 的共享点，用环境变量 `MONITOR_DB_PATH` 显式指定同一个绝对路径（如 `/home/ubuntu/vnpy-data/monitor.db`），三个进程（实盘/模拟/后端）都读它。
@@ -150,18 +149,16 @@ vnpy 的 `.vntrader` 数据目录按「当前工作目录」解析（cwd 下有 
 - **控制**（@机器人 停止/重启，自建应用）：只对实盘有意义，只实盘开
 - **通知**（群机器人 webhook）：分两个群，进程启动按 CTP_MODE 选对应 webhook，文案加 `[实盘]`/`[模拟]` 前缀
 
----
-
 ## 4. 监控数据库 monitor.db
 
-文件 `.vntrader/monitor.db`，与 vnpy 的 `database.db` 分开。SQLite + WAL + busy_timeout 处理双进程并发写。所有时间字段存北京时间字符串 `YYYY-MM-DD HH:MM:SS`，写库时 `zoneinfo("Asia/Shanghai")` 统一转换，前端零转换直接显示。
+文件在根目录 `monitor.db`（由 `MONITOR_DB_PATH` 指定），与 vnpy 的 `database.db` 分开。SQLite + WAL + busy_timeout 处理多进程并发写。所有时间字段存北京时间字符串 `YYYY-MM-DD HH:MM:SS`，写库时 `zoneinfo("Asia/Shanghai")` 统一转换，前端零转换直接显示。
 
 ### 4.1 十四张表
 
 | 表名 | 用途 | 关键字段 | 写入时机 |
 |:--|:--|:--|:--|
-| orders | 订单（委托） | vt_orderid, strategy, account, symbol, direction, offset, price, volume, traded, status, submit_time, delay_ms | 下单/撤单/拒单时 |
-| trades | 成交明细 | vt_tradeid, vt_orderid, strategy, account, symbol, price, volume, slippage, delay_ms, trade_time | 成交回报时 |
+| orders | 订单（委托） | vt_orderid, strategy, account, symbol, direction, offset, price, volume, traded, status, submit_time, queue_delay_ms, cancel_delay_ms | 下单/撤单/拒单时 |
+| trades | 成交明细 | vt_tradeid, vt_orderid, strategy, account, symbol, price, volume, slippage, trade_time | 成交回报时 |
 | positions | 持仓快照 | strategy, account, vt_symbol, direction, volume, avg_price, pnl, trading_day, snapshot_time | 每次成交后 |
 | accounts | 账户资金 | account, accountid, balance, available, frozen, margin, pnl, snapshot_time | 资金事件 + 每 3s 快照 |
 | daily_pnl | 每日盈亏 | trading_day, strategy, account, realized_pl, cumulative_pl | 每日收盘归零时 |
@@ -172,10 +169,12 @@ vnpy 的 `.vntrader` 数据目录按「当前工作目录」解析（cwd 下有 
 | trade_rounds | 交易回合 | strategy, symbol, exchange, account, direction, entry_price, exit_price, volume, pnl, holding_seconds, open_time, close_time, trading_day | 平仓 FIFO 配对 |
 | contracts | 合约基础信息 | symbol(主键), exchange, name, product, size, pricetick, update_time | monitor_interval 定时 upsert |
 | account_positions | 账户实际持仓（CTP） | account, accountid, vt_symbol, direction, volume, price, pnl, snapshot_time | 每 3s 快照 |
-| account_daily_pnl | 账户日内盈亏 | account, accountid, trading_day, realized_pl, floating_pl, balance, snapshot_time | 每 3s 快照 |
+| account_intraday_pnl | 账户日内盈亏 | account, accountid, trading_day, realized_pl, floating_pl, balance, snapshot_time | 每 3s 快照 |
 | strategy_intraday | 策略日内净值快照 | strategy, account, symbol, realized_pl, floating_pl, equity, snapshot_time | 每 15 分钟 |
 
 > 除 `contracts` 外，所有表都带 `account` 字段区分 `real`（实盘）/`simnow`（模拟盘）。contracts 表是合约规格（乘数、最小变动价位、品种名），实盘/模拟一致，symbol 是主键，换月自动跟新合约。
+
+> 延迟口径：`orders.queue_delay_ms`（发单指令 → 首次 NOTTRADED 入队）、`orders.cancel_delay_ms`（撤单指令 → CANCELLED 终态）。原 `delay_ms` 字段已废弃删除。
 
 ### 4.2 三处数据冗余（一份数据分两处记录）
 
@@ -185,11 +184,14 @@ vnpy 的 `.vntrader` 数据目录按「当前工作目录」解析（cwd 下有 
 | positions ↔ strategy_status.pos | 中 | 数据源相同，写入时机不同（成交后立即 vs 每 3s），漂移 ≤3s |
 | trade_rounds.pnl ↔ daily_pnl.realized_pl | 高 | 数据源不同（引擎 FIFO 配对 vs 策略层累计），算法不一致会对不上，待验证 |
 
----
-
 ## 5. 后端（web-backend）
 
-独立 Python 包 `web_backend`，FastAPI + SQLAlchemy 2.0。交易进程埋点 `import web_backend`，后端也 `import web_backend`，models 只有一份，是「交易写库」和「后端读库」的共同契约。
+独立 Python 包 `web_backend`，FastAPI + SQLAlchemy 2.0，**只读** monitor.db。
+
+> 交易进程和 web-backend 是**两份独立的 models/db 副本**，不是共享包：
+> - 交易进程 `run_cta.py` 只 import 自己的 `vnpy_domestic.monitor`（models + MonitorWriter）写库，不依赖 web-backend
+> - web-backend 独立 `web_backend` 包（models / db 是交易进程 monitor 的 identical copy），只读 monitor.db
+> - **两份 models.py 必须同步改**：`vnpy-domestic/vnpy_domestic/monitor/models.py` 与 `web-backend/web_backend/models.py`
 
 ### 5.1 文件结构
 
@@ -197,14 +199,15 @@ vnpy 的 `.vntrader` 数据目录按「当前工作目录」解析（cwd 下有 
 web-backend/
 ├── pyproject.toml            # fastapi / sqlalchemy / uvicorn 依赖
 └── web_backend/
-    ├── models.py             # monitor.db 14 张表（SQLAlchemy 2.0）
-    ├── writer.py             # MonitorWriter 写库（交易进程 import）
+    ├── models.py             # monitor.db 14 张表（SQLAlchemy 2.0，与交易进程 monitor 同步）
     ├── api.py                # 18 个 REST 只读接口
     ├── ws.py                 # WebSocket /ws 每 3s 全量快照广播
-    ├── db.py                 # SQLite 连接 + 自动建表
+    ├── db.py                 # SQLite 连接 + 自动建表 + 迁移
     ├── main.py               # FastAPI 入口（uvicorn :8000）
     └── seed_demo.py          # demo 造数（本地联调验证）
 ```
+
+> 交易进程侧的写库模型在 `vnpy-domestic/vnpy_domestic/monitor/`（models.py + writer.py）。
 
 ### 5.2 数据写入层（MonitorWriter）
 
@@ -214,8 +217,8 @@ web-backend/
 
 | 现有方法 | 追加调用 | 写入 |
 |:--|:--|:--|
-| `process_order_event` | `write(Order(...))` | 委托 |
-| `process_trade_event` | `write(Trade(...))` | 成交（滑点/延迟已算好） |
+| `process_order_event` | `write(Order(...))` | 委托（入队/撤单延迟已算好） |
+| `process_trade_event` | `write(Trade(...))` | 成交（滑点已算好） |
 | `process_trade_event`（平仓分支） | `settle_close(with_details=True)` → `write(TradeRound(...))` | 平仓配对 |
 | `_write_position_snapshot` | `write(Position(...))` | 持仓快照（多空分记，含浮动盈亏） |
 | `_on_account_event` | `write(Account(...))` | 资金 |
@@ -233,12 +236,12 @@ web-backend/
 | `/api/account/latest` | `account?` | 最新账户快照 |
 | `/api/positions` | `account?` `strategy?` | 最新持仓列表 |
 | `/api/account-positions` | `account?` | CTP 账户实际持仓 |
-| `/api/account-daily-pnl` | `account?` | 账户日内盈亏 |
+| `/api/account-intraday-pnl` | `account?` | 账户日内盈亏 |
 | `/api/strategies` | `account?` | 策略状态列表（含 pos/params/vars/pnl） |
 | `/api/orders` | `account?` `strategy?` `date?` `limit?` | 委托列表（倒序，按 vt_orderid 去重） |
 | `/api/orders/stats` | `account?` | 订单状态统计（活跃挂单/今日委托，按 vt_orderid 去重） |
 | `/api/orders/daily_freq` | `account?` | 每日下单频次 |
-| `/api/trades` | `account?` `strategy?` `date?` `limit?` | 成交列表（倒序，含滑点/延迟） |
+| `/api/trades` | `account?` `strategy?` `date?` `limit?` | 成交列表（倒序，含滑点） |
 | `/api/daily_pnl` | `account?` `strategy?` `days=30` | 盈亏序列 |
 | `/api/logs` | `account?` `strategy?` `limit=200` | 日志列表 |
 | `/api/system/latest` | - | 最新系统指标 |
@@ -266,8 +269,6 @@ web-backend/
 
 配对规则与 `position_lots.py` 的 `settle_close` 完全一致（四交易所规则）：DCE/CZCE/GFEX 先开先平、CFFEX 先平今、SHFE/INE 平今平昨。按「策略 + 合约 + 方向」分组，开仓成交排队，平仓成交按规则 FIFO 匹配，写 `trade_rounds` 表。
 
----
-
 ## 6. 前端（web-frontend）
 
 ### 6.1 技术栈
@@ -280,7 +281,7 @@ Vue3 + Vite + Vue Router + Element Plus + ECharts + lightweight-charts + Axios�
 web-frontend/
 ├── index.html
 ├── vite.config.js            # /api、/ws 代理到 8000
-├── .env.development          # VITE_USE_MOCK=true（本地 mock）
+├── .env.development          # VITE_USE_MOCK=false（本地走真实后端）
 ├── .env.production           # VITE_USE_MOCK=false
 ├── package.json
 └── src/
@@ -349,39 +350,62 @@ series.setData(klines.map(k => ({ time: k.datetime.slice(0, 10), open: k.open, h
 
 进出场点位：拿 `/api/klines`（蜡烛）+ `/api/trades`（标点位），成交时间对齐到 K线，不需要新表。
 
----
+## 7. 本地运行（Windows 开发）
 
-## 7. 本地运行
+### 7.1 目录结构（本地 Windows 测试开发）
 
-### 7.1 目录结构
+一个 `vnpy/` 根目录装下三个 git 仓库 + 两个账户目录 + 共享库，全部平级：
 
 ```
 Desktop/vnpy/
-├── vnpy-domestic/      交易核心（run_cta.py + RolloverCtaEngine + strategies）
-├── web-backend/        监控后端（FastAPI，读 monitor.db）
-├── web-frontend/       监控前端（Vue3 + Vite）
-├── 实盘/               实盘账户目录（只放 .vntrader + strategies）
-├── 模拟盘simnow/       simnow 账户目录（只放 .vntrader + strategies）
-└── monitor.db          监控库（三进程共用）
+├── vnpy-domestic/      ① 交易核心（git 仓库）——源码统一放这
+│   ├── run_cta.py        入口（父子双进程守护）
+│   ├── vnpy_domestic/    包（RolloverCtaEngine + monitor + trader）
+│   ├── strategies/       策略源码（git 白名单只提交 dual_ma.py；corn_scalper 实盘专属不提交）
+│   ├── scripts/          cleanup_monitor.py（监控库清理脚本）
+│   ├── .vntrader/        本地默认配置+数据（gitignore：只保留 *.example 和 vt_setting.json）
+│   │   ├── cta_strategy_setting.json / .example
+│   │   ├── secrets.yaml / .example（凭证不提交）
+│   │   └── database.db / ctp/ / log/ / trading_times.csv / vt_setting.json
+│   └── *.md              部署/使用文档（本手册、Linux部署、飞书机器人等）
+├── web-backend/        ② 监控后端（git 仓库）——只读 monitor.db，独立副本（见第 5 章）
+│   └── web_backend/      api / ws / db / models / seed_demo / main
+├── web-frontend/       ③ 监控前端（git 仓库）——Vue3 + Vite
+│   ├── src/  package.json  vite.config.js  index.html  public/
+│   ├── node_modules/     npm install 生成（gitignore）
+│   └── dist/             npm run build 生成（gitignore，nginx 用）
+├── 实盘/               实盘账户目录（非 git）——只放运行时数据
+│   ├── .vntrader/        实盘配置+数据
+│   └── strategies/       策略副本（当前为空）
+├── 模拟盘simnow/       simnow 账户目录（非 git）——同上
+│   ├── .vntrader/        模拟配置+数据
+│   └── strategies/       策略副本（corn_scalper / dual_ma / save_bar）
+└── monitor.db          共享监控库（MONITOR_DB_PATH 指向它，三进程共用）
+    ├── monitor.db-shm   SQLite WAL 附属文件（自动生成，别手动删）
+    └── monitor.db-wal
 ```
+
+关键：**三个 git 仓库平级 clone，两个账户目录只是「工作目录」**（跑哪个账户 cd 到哪个），`monitor.db` 脱离 cwd 用绝对路径共享。
 
 ### 7.2 依赖与 import
 
-web-backend 是共享 Python 包，靠两种方式让 import 找到它：
+交易进程和 web-backend 是**两份独立的 models/db 副本**，不是共享包：
 
-- 交易进程：`run_cta.py` 顶部 `sys.path.insert(0, "../web-backend")`，相对 cwd 解析
+- 交易进程 `run_cta.py`：只 import 自己的 `vnpy_domestic.monitor`（models + MonitorWriter）写库，不依赖 web-backend
+- web-backend：独立 `web_backend` 包（models / db 是交易进程 monitor 的 identical copy），只读 monitor.db
+- **两份 models.py 必须同步改**：`vnpy-domestic/vnpy_domestic/monitor/models.py` 与 `web-backend/web_backend/models.py`（文件头注释已注明「change in BOTH files together」）
+- 交易进程 import 解析：从账户目录 cd 运行 `python ../vnpy-domestic/run_cta.py`，vnpy_domestic 包随源码目录被找到
 - 后端 / seed：cd 到 web-backend 目录再跑（cwd 进 sys.path）
 
 前端 node_modules 已装好，不用重装。
 
 ### 7.3 环境变量
 
-CTP 凭证不写文件，走环境变量。simnow 只需 3 个（broker 9999 / 服务器已写死）：
+实盘凭证走环境变量；simnow 凭证写在账户目录 secrets.yaml。simnow 只需 1 个环境变量 CTP_MODE（broker 9999 / 服务器已写死）：
 
 ```bash
 export CTP_MODE=simnow
-export CTP_USER=<simnow账号>
-export CTP_PASSWORD=<simnow密码>
+# 凭证不在环境变量，写在 模拟盘simnow/.vntrader/secrets.yaml（simnow_user / simnow_password）
 ```
 
 实盘 7 个全走环境变量：
@@ -432,11 +456,9 @@ npm run dev          # http://localhost:5173
 源码统一在 vnpy-domestic，账户目录只放 .vntrader + strategies。跑哪个账户 cd 到哪个账户目录，再指向统一 run_cta.py：
 
 ```bash
-# 模拟盘 simnow
+# 模拟盘 simnow（凭证在 模拟盘simnow/.vntrader/secrets.yaml）
 cd /c/Users/<你>/Desktop/vnpy/模拟盘simnow
 export CTP_MODE=simnow
-export CTP_USER=<simnow账号>
-export CTP_PASSWORD=<simnow密码>
 export MONITOR_DB_PATH="C:/Users/<你>/Desktop/vnpy/monitor.db"
 python ../vnpy-domestic/run_cta.py
 
@@ -459,48 +481,216 @@ curl -s "http://127.0.0.1:8000/api/account/latest"
 # 前端（走 vite proxy）
 curl -s http://localhost:5173/api/time
 # 查 monitor.db 各表行数
-python -c "import sqlite3; c=sqlite3.connect('C:/Users/<你>/Desktop/vnpy/monitor.db'); [print(t, c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0]) for t in ['accounts','logs','orders','trades','positions','account_positions','strategy_status','system_metrics','daily_pnl','account_daily_pnl','klines','strategy_intraday','trade_rounds','contracts']]"
+python -c "import sqlite3; c=sqlite3.connect('C:/Users/<你>/Desktop/vnpy/monitor.db'); [print(t, c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0]) for t in ['accounts','logs','orders','trades','positions','account_positions','strategy_status','system_metrics','daily_pnl','account_intraday_pnl','klines','strategy_intraday','trade_rounds','contracts']]"
 ```
 
 ---
 
-## 8. Linux 部署
+# 第二部分 · Linux 从 GitHub clone 部署
 
-### 8.1 环境配置
+## 8. 整体架构
 
-- **服务器（腾讯云 Ubuntu）**：conda vnpy 环境，`pip install -e .`（镜像 mirrors.tencentyun.com）
-- **nginx**（一次性）：`sudo apt install nginx`
-- **前端 build 在本机做**，服务器全程不装 node
-
-### 8.2 部署步骤
-
-```bash
-# 1. 交易 + 后端，clone 两份（实盘 + 模拟各自目录）
-git clone ... → /home/ubuntu/vnpy-domestic-real
-git clone ... → /home/ubuntu/vnpy-domestic-sim
-pip install -e .             # 装项目 + sqlalchemy 依赖
-
-# 2. 前端 dist（本机 build 完传上去）
-scp -r web-frontend/dist ubuntu@服务器:/home/ubuntu/vnpy-domestic-real/web-frontend/
+```
+浏览器 ──▶ nginx (80)
+              ├── /            → 前端静态文件 dist/
+              ├── /api/        → 反代 web-backend (127.0.0.1:8000)
+              └── /ws          → 反代 WebSocket (127.0.0.1:8000, 带 Upgrade 头)
+                                    │
+                                    ▼
+                            web-backend（只读 monitor.db）
 ```
 
-### 8.3 systemd 进程安排
+- 对外只有一个 80 端口（上 HTTPS 后是 443）。
+- 后端 8000 只绑 `127.0.0.1`，外网直连不到，仅本机 nginx 能转发。
+- 进程分工：交易核心（vnpy-domestic 写 monitor.db）、web-backend（只读 monitor.db 出接口）、nginx（静态 + 反代）。
 
-三个 unit（两个交易 + 一个后端），飞书机器人仍在实盘父进程里跑 3000，不收编也不影响。
+服务器目录布局（腾讯云 Ubuntu，目标机器）：
 
-**后端 unit（可选）**：
+```
+/home/ubuntu/
+├── vnpy-domestic/          ← git clone 交易核心（共用一份源码）
+│   ├── run_cta.py
+│   ├── vnpy_domestic/  strategies/  scripts/
+├── 实盘/                    ← 实盘账户目录（非 git）——只放 .vntrader + strategies
+│   ├── .vntrader/          实盘配置+数据（secrets / database.db / log）
+│   └── strategies/         策略副本
+├── 模拟盘simnow/           ← simnow 账户目录（非 git）——同上
+│   ├── .vntrader/          模拟配置+数据
+│   └── strategies/         策略副本
+├── web-backend/            ← git clone 监控后端（独立包）
+│   └── web_backend/
+├── web-frontend/           ← git clone 前端（或只放 dist/）
+│   └── dist/               前端构建产物
+└── vnpy-data/
+    └── monitor.db          ← 共享监控库（三进程共用）
+```
+
+> 与本地 Windows 结构一致：vnpy-domestic 一份源码共用，账户目录（实盘/模拟盘simnow）只放 .vntrader + strategies，跑哪个账户 cd 到哪个账户目录、`python ../vnpy-domestic/run_cta.py`。
+
+---
+
+## 9. 部署方式选择（前端）
+
+前端有三种方式拿到 `dist/`（后端无论哪种都要 clone + pip 装依赖）：
+
+| 方式 | 服务器是否需要 Node | 说明 |
+| :--- | :--- | :--- |
+| A. clone + 服务器 build | 需要 | 服务器装 Node 22，clone 后 `npm install && npm run build` |
+| B. 本地 build + scp | 不需要 | 本地构建好 dist，直接传服务器 |
+| C. 提交 dist 到 git | 不需要 | clone 下来直接有 dist（见附录 A） |
+
+推荐：个人监控面板用 **C**（最省事），讲究仓库干净用 **A** 或 **B**。下文按 A 展开，B / C 见附录。
+
+## 10. 前端部署
+
+### 10.1 安装 Node（仅方式 A）
+
+vite 8.x 要求 Node ≥ 20.19，装 Node 22 LTS：
+
+```bash
+export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+source ~/.bashrc
+nvm install 22
+node -v      # 验证：输出 v22.x
+```
+
+> 若 `raw.githubusercontent.com` 拉不动，改用 ghproxy 代理或直接下载 npmmirror 的 Node 二进制包（见附录 C）。
+
+### 10.2 clone + 构建
+
+```bash
+cd /home/ubuntu
+sudo git clone https://github.com/practicemakeperfect666/web-frontend.git
+sudo chown -R ubuntu:ubuntu web-frontend      # ubuntu 换成你的用户名
+cd web-frontend
+npm config set registry https://registry.npmmirror.com
+npm install
+npm run build
+ls dist/      # 验证：能看到 index.html 和 assets/
+```
+
+构建产物在 `/home/ubuntu/web-frontend/dist`，这是 nginx 要托管的目录。
+
+### 10.3 方式 B：本地 build + scp（服务器免装 Node）
+
+本地（Windows git-bash）：
+
+```bash
+cd /c/Users/29523/Desktop/vnpy/web-frontend
+npm run build
+ssh ubuntu@你的IP 'mkdir -p /home/ubuntu/web-frontend/dist'
+scp -r dist/* ubuntu@你的IP:/home/ubuntu/web-frontend/dist/
+```
+
+## 11. 后端部署
+
+后端只依赖三个包（fastapi / sqlalchemy / uvicorn），用独立 venv，不碰实盘 vnpy-domestic 的环境。
+
+### 11.1 clone
+
+```bash
+cd /home/ubuntu
+sudo git clone https://github.com/practicemakeperfect666/web-backend.git
+sudo chown -R ubuntu:ubuntu web-backend
+```
+
+### 11.2 venv + 安装
+
+```bash
+cd /home/ubuntu/web-backend
+python3 -m venv venv
+venv/bin/pip install -e . -i https://mirrors.tencentyun.com/pypi/simple
+```
+
+### 11.3 MONITOR_DB_PATH 环境变量（关键）
+
+web-backend 只读交易进程写出的 `monitor.db`，路径必须和交易进程完全一致。默认是 `~/vnpy-data/monitor.db`（见 `web_backend/db.py`）。先确认你实盘 vnpy-domestic 进程的 `MONITOR_DB_PATH` 实际指向哪，下面用它。
+
+### 11.4 systemd service
+
+```bash
+sudo nano /etc/systemd/system/web-backend.service
+```
+
+粘贴（`MONITOR_DB_PATH` 换成交易进程真实路径，`User` 换成你的用户名）：
 
 ```ini
 [Unit]
-Description=vnpy-domestic web monitor
+Description=vnpy-domestic web monitor backend
 After=network.target
 
 [Service]
 User=ubuntu
-WorkingDirectory=/home/ubuntu/vnpy-domestic-real
+WorkingDirectory=/home/ubuntu/web-backend
 Environment=MONITOR_DB_PATH=/home/ubuntu/vnpy-data/monitor.db
-ExecStart=/home/ubuntu/miniconda3/envs/vnpy/bin/python -m uvicorn \
-    web_backend.main:app --host 127.0.0.1 --port 8000
+ExecStart=/home/ubuntu/web-backend/venv/bin/python -m uvicorn web_backend.main:app --host 127.0.0.1 --port 8000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+> `MONITOR_DB_PATH` 是固定路径不是敏感凭证，直接写进 unit 文件的 `Environment=` 即可（持久）。不要用 `systemctl set-environment` 那套内存注入——那会导致重启后丢失。
+
+### 11.5 启动 + 验证
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now web-backend
+sudo systemctl status web-backend     # 验证：active (running)
+
+curl http://127.0.0.1:8000/api/time   # 验证：返回服务器时间 JSON
+```
+
+## 12. 交易进程部署（vnpy-domestic）
+
+交易核心用 conda vnpy 环境（和本地一致）。vnpy-domestic 源码只 clone 一份共用，账户目录（实盘/模拟盘simnow）各建一个、只放 .vntrader + strategies，跑哪个账户 cd 到哪个账户目录。
+
+### 12.1 环境 + clone
+
+```bash
+# 前提：conda vnpy 环境已装好（vnpy + vnpy_ctp + 本项目依赖）
+# 1. clone 交易核心（一份共用源码）
+git clone https://github.com/practicemakeperfect666/vnpy-domestic.git /home/ubuntu/vnpy-domestic
+
+# 2. 建两个账户目录（只放 .vntrader + strategies，跑哪个 cd 到哪个）
+mkdir -p /home/ubuntu/实盘/.vntrader /home/ubuntu/实盘/strategies
+mkdir -p /home/ubuntu/模拟盘simnow/.vntrader /home/ubuntu/模拟盘simnow/strategies
+
+# 3. 从源码模板复制配置，改成自己的（cp .example 去后缀，再手写）
+for d in /home/ubuntu/实盘 /home/ubuntu/模拟盘simnow; do
+    cp /home/ubuntu/vnpy-domestic/.vntrader/secrets.yaml.example              $d/.vntrader/secrets.yaml
+    cp /home/ubuntu/vnpy-domestic/.vntrader/cta_strategy_setting.json.example $d/.vntrader/cta_strategy_setting.json
+    cp /home/ubuntu/vnpy-domestic/.vntrader/vt_setting.json                   $d/.vntrader/vt_setting.json
+done
+# 编辑各自 .vntrader/secrets.yaml（simnow 密码 / 飞书 webhook）、cta_strategy_setting.json（策略参数）
+# trading_times.csv（交易时段）gitignore 了，从本地 scp 上去
+
+# 4. 交易核心 + 后端包装进 conda vnpy 环境（镜像 mirrors.tencentyun.com）
+pip install -e /home/ubuntu/vnpy-domestic   # 交易核心
+pip install -e /home/ubuntu/web-backend     # 后端（web_backend 包进环境）
+
+# 5. 建共享库目录
+mkdir -p /home/ubuntu/vnpy-data
+```
+
+### 12.2 systemd 交易 unit
+
+两个 unit（vnpy-trade-real / vnpy-trade-sim）靠各自 unit 里的 `Environment=CTP_MODE` 区分（实盘 real / 模拟 simnow）；敏感凭证不写进 unit 文件：
+
+```ini
+# /etc/systemd/system/vnpy-trade-real.service
+[Unit]
+Description=vnpy-domestic real trading
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/实盘
+Environment=CTP_MODE=real
+Environment=MONITOR_DB_PATH=/home/ubuntu/vnpy-data/monitor.db
+ExecStart=/home/ubuntu/miniconda3/envs/vnpy/bin/python ../vnpy-domestic/run_cta.py
 Restart=always
 RestartSec=3
 
@@ -508,91 +698,156 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-**两个交易 unit（vnpy-trade-real / vnpy-trade-sim）**，靠 `WorkingDirectory` 和 `Environment` 区分：
-
 ```ini
-# vnpy-trade-real.service
-[Service]
-WorkingDirectory=/home/ubuntu/vnpy-domestic-real
-Environment=CTP_MODE=real
-Environment=CTP_USER=<实盘账号>
-Environment=CTP_PASSWORD=<实盘密码>
-Environment=CTP_BROKER=<brokerID>
-Environment=CTP_TD_SERVER=<td地址>
-Environment=CTP_MD_SERVER=<md地址>
-Environment=CTP_APPID=<产品名>
-Environment=CTP_AUTHCODE=<授权编码>
-Environment=MONITOR_DB_PATH=/home/ubuntu/vnpy-data/monitor.db
-ExecStart=... python run_cta.py
+# /etc/systemd/system/vnpy-trade-sim.service
+[Unit]
+Description=vnpy-domestic simnow trading
+After=network.target
 
-# vnpy-trade-sim.service
 [Service]
-WorkingDirectory=/home/ubuntu/vnpy-domestic-sim
+User=ubuntu
+WorkingDirectory=/home/ubuntu/模拟盘simnow
 Environment=CTP_MODE=simnow
 Environment=MONITOR_DB_PATH=/home/ubuntu/vnpy-data/monitor.db
-ExecStart=... python run_cta.py
+ExecStart=/home/ubuntu/miniconda3/envs/vnpy/bin/python ../vnpy-domestic/run_cta.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
 ```
-
-> uvicorn 只监听 127.0.0.1，公网入口只留 nginx。开启/关闭监控后端：
-> `sudo systemctl enable --now vnpy-web-backend` / `sudo systemctl disable --now vnpy-web-backend`（交易不受影响）。
-
-### 8.4 nginx（唯一公网入口，80，纯 HTTP）
-
-| 浏览器访问 | nginx 处理 |
-|:--|:--|
-| `/`（其他） | 从磁盘读 dist 静态文件返回 |
-| `/api/*` | 反代 127.0.0.1:8000 |
-| `/ws` | 反代 127.0.0.1:8000（websocket） |
-| `/webhook/feishu` | 反代 127.0.0.1:3000（可选，收编飞书） |
-
-配置文件放 `/etc/nginx/sites-available/monitor`，软链到 sites-enabled，删默认站点：
 
 ```bash
-sudo nano /etc/nginx/sites-available/monitor
-sudo ln -s /etc/nginx/sites-available/monitor /etc/nginx/sites-enabled/
-sudo rm /etc/nginx/sites-enabled/default
+# 实盘凭证注入（内存，不落盘；重启服务器后清空，需重新执行）
+sudo systemctl set-environment \
+  CTP_USER=<实盘账号> CTP_PASSWORD=<实盘密码> CTP_BROKER=<brokerID> \
+  CTP_TD_SERVER=<td地址> CTP_MD_SERVER=<md地址> CTP_APPID=<产品名> CTP_AUTHCODE=<授权编码>
+sudo systemctl restart vnpy-trade-real
 ```
+
+> 区分机制：`CTP_MODE` 写死在各自 unit 的 `Environment=`（unit 变量每进程独立，实盘读 real、模拟盘读 simnow，互不覆盖）；**实盘凭证**走 `systemctl set-environment` 注入内存（敏感，不落盘，重启服务器后清空需重新注入）；**模拟盘凭证**写在账户目录 `.vntrader/secrets.yaml`（simnow_user / simnow_password，虚拟资金不敏感）。三条各管各的：CTP_MODE 走 unit 文件、实盘凭证走 manager 环境、模拟盘凭证走 secrets.yaml，互不串号。飞书机器人仍在实盘父进程里跑 3000，不收编也不影响。
+> 开启/关闭监控后端：`sudo systemctl enable --now web-backend` / `sudo systemctl disable --now web-backend`（交易不受影响）。
+
+## 13. nginx 反代
+
+```bash
+sudo apt install -y nginx
+sudo nano /etc/nginx/sites-available/web-monitor
+```
+
+粘贴整段（`server_name` 填域名或服务器公网 IP）：
 
 ```nginx
 server {
     listen 80;
+    server_name 你的域名或IP;
 
-    # 前端静态 + history 路由 fallback
+    # 前端静态文件
+    root /home/ubuntu/web-frontend/dist;
+    index index.html;
+
+    # SPA 回退（history 路由，刷新子页面必须）
     location / {
-        root /home/ubuntu/vnpy-domestic-real/web-frontend/dist;
-        try_files $uri $uri/ /index.html;   # history 路由刷新不 404
+        try_files $uri $uri/ /index.html;
     }
 
-    # REST API 反代
+    # REST 反代到后端
     location /api/ {
         proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
-    # WebSocket 反代（必须带升级头）
+    # WebSocket 反代（实时快照走这里）
     location /ws {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
         proxy_read_timeout 3600s;
     }
 }
 ```
 
+三个关键点，缺一个都会坏：
+
+1. `try_files ... /index.html` —— 前端用 createWebHistory（HTML5 history 路由），直接刷新 `/dashboard`、`/orders` 会 404，这行把找不到的路径回退给 index.html 让前端路由接管。
+2. `location /api/` —— 前端 axios `baseURL` 是空串，请求打同域 `/api/xxx`，靠 nginx 转发到 8000。
+3. `location /ws` 的 `Upgrade`/`Connection "upgrade"` + `http_version 1.1` —— 前端生产模式用 `location.host` 连 `/ws`，缺这些头 WebSocket 握手失败，实时快照不刷新。
+
+启用 + 生效：
+
 ```bash
-sudo nginx -t                 # 语法检查必须通过
+sudo ln -s /etc/nginx/sites-available/web-monitor /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t                     # 验证：syntax is ok / test is successful
 sudo systemctl reload nginx
 ```
 
-两个必踩坑：`try_files ... /index.html`（history 路由刷新 404）；`/ws` 缺 `Upgrade`/`Connection` 升级头会握手失败、前端一直重连。
+## 14. 端口与安全组
 
-### 8.5 公网访问（不搞 HTTPS / 域名）
+- 对外只暴露 80（HTTPS 后加 443），腾讯云安全组只放行这两个。
+- 8000 端口绑 `127.0.0.1`，外网直连不到，安全组不用开。
+- 后端 FastAPI 是 CORS 全开、无鉴权的，绑 127.0.0.1 等于物理隔离外网，只让本机 nginx 转发进来。**不要**把后端改成 `--host 0.0.0.0` 裸暴露。
 
-不备案不买域名：直接 `http://公网IP`（80 端口）访问面板即可；飞书控制回调仍用 localtunnel 穿透（见飞书控制机器人文档）。更稳的替代是 SSH 隧道 `ssh -L 8000:127.0.0.1:8000 ubuntu@服务器` 或 Tailscale / ZeroTier 组内网，不把端口暴露公网。将来要 HTTPS + 域名再走「域名 + DNS + ICP 备案 + certbot」，此处从略。
+## 15. 验证清单
+
+1. 浏览器开 `http://你的IP/` → 看到策略卡片首页。
+2. 刷新 `http://你的IP/dashboard` → 不 404，说明 try_files 生效。
+3. F12 → Console 无 `/api` 报错，说明 REST 反代通。
+4. F12 → Network → WS → `/ws` 状态 101，说明 WebSocket 握手成功。
+5. 页面数据 3 秒自动刷新 = WS 正常推送。
+6. `sudo journalctl -u web-backend -f` 能看到访问记录。
+
+## 16. HTTPS 与公网访问
+
+**不备案不买域名**：直接 `http://公网IP`（80 端口）访问面板即可；飞书控制回调仍用 localtunnel 穿透（见飞书控制机器人文档）。更稳的替代是 SSH 隧道 `ssh -L 8000:127.0.0.1:8000 ubuntu@服务器` 或 Tailscale / ZeroTier 组内网，不把端口暴露公网。
+
+**要 HTTPS + 域名**（有域名时）：
+
+```bash
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d 你的域名
+```
+
+证书自动续期。前端 ws.js 会自动切 `wss`，nginx 的 WebSocket 反代配置不用改。
 
 ---
 
-## 9. 坑清单（提前规避）
+## 附录 A：dist 是否提交的取舍
+
+`.gitignore` 默认忽略 `dist`（构建产物）。两种模式：
+
+| 模式 | 做法 | 代价 |
+| :--- | :--- | :--- |
+| 提交 dist（省事） | 删掉 `.gitignore` 里的 `dist`，本地 build 后 `git add dist` 提交 | 每次 build 文件名哈希都变，git 历史变脏、仓库变大 |
+| 不提交 dist（干净） | 保持现状，服务器 build 或本地 build scp | 服务器得装 Node 或手动传产物 |
+
+个人监控面板推荐提交 dist，部署最省事。
+
+## 附录 B：.env 文件说明
+
+前端 `.gitignore` 规则：`.env`、`.env.*` 都忽略，仅 `!.env.example` 例外上传。三个文件内容都是同一个变量 `VITE_USE_MOCK=false`，非密钥。
+
+- `.env.example` → 上传（模板）
+- `.env.development` / `.env.production` → 忽略，不上传
+
+服务器 build 时缺 `.env.production` 无影响：`VITE_USE_MOCK` 为 undefined，自动走真实后端，正是生产想要的行为。
+
+## 附录 C：国内网络加速
+
+腾讯云访问 GitHub / npm 官方源慢或超时，已内置的处理：
+
+- npm 已配 npmmirror：`npm config set registry https://registry.npmmirror.com`
+- pip 已配腾讯云镜像：`-i https://mirrors.tencentyun.com/pypi/simple`
+- git clone 卡住时：改用 ssh 协议 `git@github.com:...`（配 ssh key），或走 ghproxy 代理前缀
+- Node 下载已配 npmmirror 镜像：`NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node`
+
+---
+
+# 坑清单（提前规避）
 
 1. **合约覆盖坑**：单 main_engine 双 CTP 会合约冲突，必须走「两个进程」。
 2. **import 不冲突，数据文件冲突**：两个进程 import vnpy 互不影响（内存隔离），但 .vntrader 数据文件要隔离，靠两个 WorkingDirectory。
@@ -613,10 +868,11 @@ sudo systemctl reload nginx
 17. **lightweight-charts v4/v5 API 不同**：`addSeries(CandlestickSeries)`（v5）vs `addCandlestickSeries()`（v4）。
 18. **时间零转换**：后端已存北京时间字符串，前端直接显示，别再 `new Date()` 转一遍（带本地时区错乱）。
 19. **订单统计按 vt_orderid 去重**：同一订单有多行状态流转（SUBMITTING → ALLTRADED），活跃挂单/今日委托要按 vt_orderid 取最新状态，不能按行计数；日期归口按交易日（夜盘 20:00 后归下一交易日）。
+20. **删表字段要连带删列**：models 里删字段时，老库对应列若 `NOT NULL`（如旧 `delay_ms`），新代码 INSERT 不写它就会 `NOT NULL constraint failed`、写库静默失败。迁移时用 `ALTER TABLE ... DROP COLUMN` 把废弃列一起删掉。
 
 ---
 
-## 10. 与专业团队的差距（后续改进方向）
+# 与专业团队的差距（后续改进方向）
 
 按「补上就明显上台阶」排序：
 

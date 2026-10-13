@@ -32,7 +32,8 @@ class Order(Base):
     traded: Mapped[float] = mapped_column(Float, default=0)
     status: Mapped[str] = mapped_column(String(16))
     submit_time: Mapped[str] = mapped_column(String(32))
-    delay_ms: Mapped[float] = mapped_column(Float, default=0)
+    queue_delay_ms: Mapped[float] = mapped_column(Float, default=0)
+    cancel_delay_ms: Mapped[float] = mapped_column(Float, default=0)
 
 
 class Trade(Base):
@@ -48,7 +49,6 @@ class Trade(Base):
     price: Mapped[float] = mapped_column(Float)
     volume: Mapped[float] = mapped_column(Float)
     slippage: Mapped[float] = mapped_column(Float, default=0)
-    delay_ms: Mapped[float] = mapped_column(Float, default=0)
     trade_time: Mapped[str] = mapped_column(String(32))
 
 
@@ -83,10 +83,10 @@ class AccountPosition(Base):
     snapshot_time: Mapped[str] = mapped_column(String(32))
 
 
-class AccountDailyPnl(Base):
+class AccountIntradayPnl(Base):
     """Account-level intraday P&L (realized + floating, sourced from CTP)."""
 
-    __tablename__ = "account_daily_pnl"
+    __tablename__ = "account_intraday_pnl"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     account: Mapped[str] = mapped_column(String(16), index=True)
