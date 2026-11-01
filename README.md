@@ -2,7 +2,7 @@
   <br>
   <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python" alt="Python">
   <img src="https://img.shields.io/badge/vnpy-4.4.0-blue?style=flat-square" alt="vnpy">
-  <img src="https://img.shields.io/badge/version-0.2.0-brightgreen?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.2.1-brightgreen?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="License">
   <br><br>
 
@@ -13,6 +13,16 @@
 </div>
 
 ---
+
+## v0.2.1 更新（2026-11）
+
+- **换月改读表**：主力合约不再查新浪，改读 `data/rollover.json`（由回测仓 `scripts/daily.py` 生成），回测与实盘同源；按文件 mtime 热加载、`data_through` 超 10 天拒绝判主力、品种缺失不静默退回新浪
+- **带仓移仓**：有持仓也能换月——冻结 → 撤单 → 开新（对手价超 3 跳，夹涨跌停）→ 平旧（SHFE/INE 拆平昨/平今）→ 切合约 → 解冻，每一步推送通知
+- **失败分两阶段**：老仓未动 → 平掉新仓回滚；老仓已动 → 继续补平，绝不回滚（避免制造反向敞口）；补不平则停策略 + 报出"策略外账"手数，等人工接管
+- **移仓跑独立线程 + 事件线程执行切换**：vnpy 的 EventEngine 单线程，回调里阻塞等成交会收不到成交回报；改为移仓线程只下单与投递 `_pending_switch`，由定时器执行 `stop/切合约/start`
+- **换月表更新提醒**：收盘后 15:10 若表还没覆盖当天，推一条 `📅 换月表待更新`（每天一次，节假日靠"当天有市场活动"判断不误报）
+- **双尺子（可选）**：`ROLLOVER_ADJUST_PRICES=1` 时策略的 tick / bar / 成交 / 委托全部用复权价（换月指标不断层），下单价格再除回真实价；引擎侧的账户、成交、滑点、监控仍用真实价
+- **修复**：移仓在事件线程阻塞、提前返回不解锁导致策略永久冻结、`_contract_month` 未剥后缀使月份断档恒为 0、交割过滤对带后缀代码静默失效
 
 ## v0.2.0 更新（2026-10）
 
@@ -36,7 +46,8 @@ vnpy-domestic 是一个面向国内期货实盘的 vnpy 扩展工具包。它不
 
 | 痛点 | 方案 |
 |:----|:-----|
-| 主力合约到期后手动换月，错过行情 | `RolloverCtaEngine` 自动识别主力、持仓归零自动换月 |
+| 主力合约到期后要手动换月，错过行情 | `RolloverCtaEngine` 从**换月复权表**读主力；空仓直接切、有仓自动移仓（冻结→撤单→开新→平旧，失败回滚）|
+| 回测与实盘用不同算法判主力，两条线对不上 | 生成逻辑只在回测仓 `scripts/` 里，实盘只读同一份 `data/rollover.json` |
 | 集合竞价 tick 时间戳错位（20:59 → 21:00） | `MyBarGenerator` 时间戳自动校正 |
 | 午休/小节间歇无效 tick 干扰 K 线 | 非交易时段自动过滤 |
 | 跨交易段 volume 重复计算 | 段首全量 + 后续增量的增量模式 |
@@ -88,7 +99,7 @@ pip install -e ./web-backend   # 监控后端（可选；只在跑 Web 面板时
 | 包 | 用途 |
 |:---|:-----|
 | `pyyaml` | 读取 `secrets.yaml` 通知配置 |
-| `requests` | 新浪换月 API + 钉钉/飞书 HTTP 推送 |
+| `requests` | 钉钉/飞书 HTTP 推送 |
 | `akshare` | 免费期货行情数据源 |
 | `psutil` | 系统硬件监控（CPU/内存/磁盘） |
 | `pandas` | CSV 读写与数据整理 |
@@ -271,8 +282,8 @@ feishu_host: "127.0.0.1"             # 监听地址，Linux 服务器改 0.0.0.0
 >
 > - **配置入口**：`add_strategy` 调用 `normalize_vt_symbol` 规范化，`RB2610.SHFE` → `rb2610.SHFE`、
 >   `RM2701.CZCE` → `RM701.CZCE`，修正结果写回 `cta_strategy_setting.json` 并记日志
-> - **换月方向**（Sina → CTP）：新浪统一返回大写 2 位年（`RB2610`/`MA2610`），
->   按交易所转小写/大写 + CZCE 截年份 → `rb2610.SHFE`/`MA610.CZCE`
+> - **换月方向**（换月表 → CTP）：表里存**库内格式**（`m2701`、`SR2701`，无后缀），
+>   按交易所转小写/大写 + CZCE 截年份 → `rb2610.SHFE`/`MA701.CZCE`
 > - **数据加载方向**（CTP → akshare）：CZCE 按当前年份补年份前缀 → `MA610` → `MA2610` 查询 Sina
 
 ### vt_setting.json（数据源配置）
@@ -330,11 +341,94 @@ Linux 服务器部署（systemd 守护 + CTP 凭证环境变量注入）见 `vnp
 
 继承 `CtaEngine`，叠加自动换月、成交通知、P&L 追踪和 CTP 断连监控。
 
-**换月逻辑：** 使用新浪财经 API 按持仓量匹配主力——请求 `nf_XXX0` 连续合约和 24 个月合约，持仓量一致的即为主力。新浪返回的代码统一经 `normalize_vt_symbol` 转成 CTP InstrumentID 格式（SHFE/INE/DCE/GFEX 小写、CZCE/CFFEX 大写、CZCE 年份截为 1 位），避免拼出 `RB2610.SHFE` 这类 CTP 查不到的代码。换月执行前先 `get_contract` 验证新合约存在，不存在则跳过不动状态。换月检查分三个时机：初始化时静默记录（`_check_rollover_for_init`）、初始化后汇总推送（`send_rollover_init_summary`）、无持仓时即时检查（`_check_and_notify_rollover`）。换月后保留累计盈亏（当日已实现盈亏跨合约延续）。
+**换月逻辑（读表，与回测同源）：** 主力合约来自 `data/rollover.json`——由**回测仓**
+`vnpy_backtester/scripts/publish.py`（或 `daily.py` 一键跑）生成，实盘只读不生成。
+`_fetch_main_contract(variety)` 取表里该品种的最后一段，即当前主力；表里存库内格式
+（`m2701`/`SR2701`），经 `normalize_vt_symbol` 转成 CTP InstrumentID 后使用。
 
-**合约代码规范化：** `normalize_vt_symbol(vt_symbol)` 是全局唯一的代码格式入口，`add_strategy` 加载配置时先规范化再建策略（写错大小写/年份位数也能订阅成功，修正会写回 `cta_strategy_setting.json` 并记日志），换月比对也用规范化后的 `vt_symbol` 判断是否变化。
+> **表的位置与更新**
+> - 默认 `<仓库根>/data/rollover.json`，可用环境变量 `ROLLOVER_TABLE` 覆盖
+> - 引擎按文件 mtime **热加载**：`daily.py` 覆盖后无需重启
+> - `data_through` 超过 **10 天**视为过期，拒绝拿它判主力（记 ERROR 日志），避免用旧表猜
+> - 表里没有的品种直接返回 `None`，**不会**静默退回新浪
+> - **每日更新提醒**：收盘后 15:10 若表的 `data_through` 还没覆盖当天，推一条
+>   `📅 换月表待更新`（带落后天数和要跑的命令），每天只推一次；节假日不误报——
+>   要求"当天确实有过市场活动"（CTP 有 tick/account 事件）才会提醒
 
-**锁仓优化（换月判断）：** 换月前用 `_has_position` 判断是否实际有持仓，而非只看净持仓 `pos`——只有 `pos == 0` 且锁仓的 `long_pos`/`short_pos` 都为 0 才换月。锁仓策略（多空对冲，净持仓 0 但两边各持有一手）不会被误判为空仓触发换月，避免换月导致持仓错位；开平仓通知显示「多X/空Y」，非锁仓策略走引擎持仓批次（`position_lots`）。
+**换月时机：** 三个入口——初始化时静默记录（`_check_rollover_for_init`）、初始化后汇总推送
+（`send_rollover_init_summary`）、运行中定时检查（`process_timer_event`，默认每 60s，
+只在交易时段 09:05–14:45 / 21:05–22:55 / 00:05–02:20）。平仓后若恰好空仓，`process_trade_event`
+里也会立即补一次检查。
+
+**空仓换月：** `get_contract` 验证新合约存在 → 切 `vt_symbol` + 重新 `on_init` → 恢复变量
+（**丢弃价格类变量**：`entry_price`/`intra_trade_high`/`atr`/`ma20` 等旧点位带到新合约会立刻
+误触发止损；`cumulative_pl`/`lots`/`pos` 保留）→ 原来在跑就重新 `start`。
+
+**带仓移仓（`_migrate_position`）：** 有持仓时不再跳过，按下面的顺序执行，**每一步都推送通知**：
+
+| 步骤 | 动作 | 失败时 |
+|:---|:---|:---|
+| 🔒 冻结 | `_migrating` 加锁，策略下单全部丢弃 | — |
+| 🧹 撤单 | `cancel_all` 撤掉全部挂单 | 继续 |
+| 🟢 开新 | 对手价**超 3 跳**开等量仓（`_send_manual` 绕过策略直发） | 回滚（无需平旧） |
+| 🔵 平旧 | 按交易所规则拆平昨/平今（SHFE/INE）或 `CLOSE` | 平掉新仓回滚 |
+| ✅ 完成 | 切合约 + 重建状态 + 解冻 + 恢复运行 | — |
+
+**保护机制：**
+
+- **表过期不换月**：`data_through` 超过 10 天 → 拒绝判主力并推送 `🚨`（策略继续跑在老合约上，
+  不会换到错合约）
+
+- **超价 3 跳**：买 = 卖一 +3×tick、卖 = 买一 −3×tick，保证吃透盘口；自动夹在涨跌停内
+  （超涨停是废单）；跳数用环境变量 `ROLLOVER_SLIPPAGE_TICKS` 调，每笔都记对手价→委托价，
+  事后能算移仓成本
+- 移仓跑在**独立线程**——vnpy 的 `EventEngine` 是单线程的，在回调里阻塞等成交会让
+  成交回报永远进不来，必然超时
+- **线程只投递、事件线程执行**：移仓线程下完单后只写 `_pending_switch`，由定时器
+  （事件线程）执行 `stop → 切合约 → start → 解冻`，保证 `on_init/on_start` 和 `on_bar`
+  永远在同一条线程上串行；成交到切换之间最多等 1 秒，策略保持冻结
+- 每腿 3 秒超时，成交数量不足即判定失败
+- 失败后 **5 分钟冷却**，不会每分钟反复下单
+- 冻结用 `try/finally` 解锁，切合约抛异常也不会把策略冻死
+- 双向锁仓（多空各持一手）不自动移仓，直接告警要求手工处理
+- 移仓过程记 `write_log`（进 vnpy 日志 + monitor.db，失败自动升 ERROR 并额外告警）
+
+**双尺子：指标用复权价（可选，默认关）**
+
+换月当天合约价格会跳一截（M2609 → M2701 差 30~60 点），指标（MA/ATR/布林）如果直接用
+真实价算，会在换月处断层，信号跟着乱。打开开关后：
+
+```
+CTP tick（真实价 3000）
+   ↓ process_tick_event 复制并 ×1.05（当前段的因子）
+策略收到 3150 → BarGenerator 合成 bar → on_bar → 指标在复权空间计算
+   ↓ 策略 buy(3148)
+send_order：3148 / 1.05 = 2998.1 → 取整 2998 → 下给 CTP
+```
+
+开关方式（账户目录的环境变量）：
+
+```bat
+set ROLLOVER_ADJUST_PRICES=1
+```
+
+| 位置 | 行为 |
+|:---|:---|
+| `process_tick_event` | 给策略的 tick 价格 × 因子（`copy` 副本，原 tick 不动） |
+| `process_trade_event` | 给策略的成交价 × 因子 —— **不换的话** strategy 用真实入场价和复权 bar 算盈亏，会凭空多出 `价格×(因子-1)` 的假盈利 |
+| `process_order_event` | 给策略的委托价 × 因子（engine 自己的滑点统计仍用真实价） |
+| `_factor_of` | 查表取当前主力段因子；合约不在主力段 / 表读不到 → 1.0 |
+| `send_order` | 策略价格 ÷ 因子，再按 `pricetick` 取整 |
+| `last_prices` / 移仓取盘口 / 监控快照 | **始终用真实价**（不会被因子污染） |
+
+> ⚠️ 三个已知限制：
+> 1. 开关**默认关**；打开前先在 SimNow 验证指标连续、下单价格落在真实 tick 网格
+> 2. monitor 的 K 线写入（`_write_kline`）尚未做还原，开启后可能记成复权价
+> 3. 策略内部算出的盈亏是**等比例放大**（真实盈亏 × 因子），不再有假盈利，但绝对点数止损
+>    （如"止损 20 点"）实际生效为 `20 / 因子` 点，需要按因子调整参数
+
+**锁仓判断：** `_has_position` 不只看净持仓 `pos`，也看 `long_pos`/`short_pos`——锁仓策略
+（多空各一手、净持仓 0）不会被误判成空仓而直接换月。
 
 **盈亏统计：** 平仓成交按交易所规则（`settle_close`）匹配持仓批次，推送本次盈亏与累计盈亏（点差）；平仓单挂出时附预估盈亏（挂单价 vs 开仓成本价）。累计盈亏按交易日统计，每日收盘归零（隔夜持仓按逐日盯市已结算，次日从 0 起算）。
 
@@ -474,8 +568,14 @@ vnpy-domestic/
 │   ├── cta_strategy_data.json          ← 策略变量持久化（有成交后自动填充）
 │   └── trading_times.csv               ← 交易时段（自动更新）
 │
+├── data/
+│   └── rollover.json                   ← 换月复权表（回测仓生成，实盘只读）
+│
 ├── vnpy_domestic/
 │   ├── __init__.py                     ← 导出 MyBarGenerator，注册 akshare 别名
+│   ├── rollover/
+│   │   ├── __init__.py                 ← 导出 RolloverTable 等读表接口
+│   │   └── table.py                    ← 换月复权表读取（与回测仓 rollover_table.py 逐字节一致）
 │   ├── monitor/
 │   │   ├── __init__.py                 ← 导出 models + MonitorWriter
 │   │   ├── models.py                   ← monitor.db 14 张表（写侧）
@@ -499,6 +599,16 @@ vnpy-domestic/
     └── cleanup_monitor.py              ← monitor.db 快照清理（删 10 天前保留最新）
 ```
 
+> **数据准备不在这里。** 换月复权表的生成与数据体检都在回测仓：
+>
+> ```bat
+> cd C:\Users\29523\Desktop\vnpy_backtester
+> python scripts\daily.py        :: 诊断 + 生成表 + 写回实盘这份
+> ```
+>
+> 本仓只有读表模块（`vnpy_domestic/rollover/`）和表数据（`data/rollover.json`），
+> 不产生任何派生文件。
+
 ---
 
 ## 致谢
@@ -519,3 +629,4 @@ furnished to do so, subject to the following conditions:
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
 ```
+

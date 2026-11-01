@@ -513,10 +513,10 @@ python -c "import sqlite3; c=sqlite3.connect('C:/Users/<你>/Desktop/vnpy/monito
 ├── vnpy-domestic/          ← git clone 交易核心（共用一份源码）
 │   ├── run_cta.py
 │   ├── vnpy_domestic/  strategies/  scripts/
-├── 实盘/                    ← 实盘账户目录（非 git）——只放 .vntrader + strategies
+├── real/                    ← 实盘账户目录（非 git）——只放 .vntrader + strategies（目录名须纯 ASCII，见坑 25）
 │   ├── .vntrader/          实盘配置+数据（secrets / database.db / log）
 │   └── strategies/         策略副本
-├── 模拟盘simnow/           ← simnow 账户目录（非 git）——同上
+├── simnow/           ← simnow 账户目录（非 git）——同上
 │   ├── .vntrader/          模拟配置+数据
 │   └── strategies/         策略副本
 ├── web-backend/            ← git clone 监控后端（独立包）
@@ -527,7 +527,7 @@ python -c "import sqlite3; c=sqlite3.connect('C:/Users/<你>/Desktop/vnpy/monito
     └── monitor.db          ← 共享监控库（三进程共用）
 ```
 
-> 与本地 Windows 结构一致：vnpy-domestic 一份源码共用，账户目录（实盘/模拟盘simnow）只放 .vntrader + strategies，跑哪个账户 cd 到哪个账户目录、`python ../vnpy-domestic/run_cta.py`。
+> 与本地 Windows 结构一致：vnpy-domestic 一份源码共用，账户目录（Linux 用 real/simnow，Windows 用 实盘/模拟盘simnow）只放 .vntrader + strategies，跑哪个账户 cd 到哪个账户目录、`python ../vnpy-domestic/run_cta.py`。**Linux 账户目录名必须纯 ASCII（不能中文）**，否则 vnpy_ctp 连 CTP 报 `can not open CFlow file`，见坑 25。
 
 ---
 
@@ -645,7 +645,7 @@ curl http://127.0.0.1:8000/api/time   # 验证：返回服务器时间 JSON
 
 ## 12. 交易进程部署（vnpy-domestic）
 
-交易核心用 conda vnpy 环境（和本地一致）。vnpy-domestic 源码只 clone 一份共用，账户目录（实盘/模拟盘simnow）各建一个、只放 .vntrader + strategies，跑哪个账户 cd 到哪个账户目录。
+交易核心用 conda vnpy 环境（和本地一致）。vnpy-domestic 源码只 clone 一份共用，账户目录（real/simnow）各建一个、只放 .vntrader + strategies，跑哪个账户 cd 到哪个账户目录。
 
 ### 12.1 环境 + clone
 
@@ -654,12 +654,12 @@ curl http://127.0.0.1:8000/api/time   # 验证：返回服务器时间 JSON
 # 1. clone 交易核心（一份共用源码）
 git clone https://github.com/practicemakeperfect666/vnpy-domestic.git /home/ubuntu/vnpy-domestic
 
-# 2. 建两个账户目录（只放 .vntrader + strategies，跑哪个 cd 到哪个）
-mkdir -p /home/ubuntu/实盘/.vntrader /home/ubuntu/实盘/strategies
-mkdir -p /home/ubuntu/模拟盘simnow/.vntrader /home/ubuntu/模拟盘simnow/strategies
+# 2. 建两个账户目录（只放 .vntrader + strategies，跑哪个 cd 到哪个；目录名必须纯 ASCII 不能中文，否则 vnpy_ctp 报 can not open CFlow file，见坑 25）
+mkdir -p /home/ubuntu/real/.vntrader /home/ubuntu/real/strategies
+mkdir -p /home/ubuntu/simnow/.vntrader /home/ubuntu/simnow/strategies
 
 # 3. 从源码模板复制配置，改成自己的（cp .example 去后缀，再手写）
-for d in /home/ubuntu/实盘 /home/ubuntu/模拟盘simnow; do
+for d in /home/ubuntu/real /home/ubuntu/simnow; do
     cp /home/ubuntu/vnpy-domestic/.vntrader/secrets.yaml.example              $d/.vntrader/secrets.yaml
     cp /home/ubuntu/vnpy-domestic/.vntrader/cta_strategy_setting.json.example $d/.vntrader/cta_strategy_setting.json
     cp /home/ubuntu/vnpy-domestic/.vntrader/vt_setting.json                   $d/.vntrader/vt_setting.json
@@ -699,7 +699,7 @@ After=network.target
 
 [Service]
 User=ubuntu
-WorkingDirectory=/home/ubuntu/实盘
+WorkingDirectory=/home/ubuntu/real
 Environment=CTP_MODE=real
 Environment=MONITOR_DB_PATH=/home/ubuntu/vnpy-data/monitor.db
 ExecStart=/home/ubuntu/miniconda3/envs/vnpy/bin/python ../vnpy-domestic/run_cta.py
@@ -726,7 +726,7 @@ After=network.target
 
 [Service]
 User=ubuntu
-WorkingDirectory=/home/ubuntu/模拟盘simnow
+WorkingDirectory=/home/ubuntu/simnow
 Environment=CTP_MODE=simnow
 Environment=MONITOR_DB_PATH=/home/ubuntu/vnpy-data/monitor.db
 ExecStart=/home/ubuntu/miniconda3/envs/vnpy/bin/python ../vnpy-domestic/run_cta.py
@@ -762,15 +762,15 @@ sudo systemctl status vnpy-trade-real     # 验证 active (running)
 
 **只跑实盘**（不要模拟盘）：
 
-- 12.1 第 2 步只建 `实盘` 目录，跳过 `模拟盘simnow`
-- 12.1 第 3 步只 cp 实盘那一份配置（for 循环改成只 cp 实盘路径）
+- 12.1 第 2 步只建 `real` 目录，跳过 `simnow`
+- 12.1 第 3 步只 cp real 那一份配置（for 循环改成只 cp real 路径）
 - 12.2 只建 `vnpy-trade-real.service`，`vnpy-trade-sim.service` 不建
 - 实盘凭证照常 `systemctl set-environment` 注入
 
 **只跑模拟盘**（不要实盘）：
 
-- 12.1 第 2 步只建 `模拟盘simnow` 目录
-- 12.1 第 3 步只 cp 模拟盘那一份，`.vntrader/secrets.yaml` 填 simnow_user / simnow_password
+- 12.1 第 2 步只建 `simnow` 目录
+- 12.1 第 3 步只 cp simnow 那一份，`.vntrader/secrets.yaml` 填 simnow_user / simnow_password
 - 12.2 只建 `vnpy-trade-sim.service`，`vnpy-trade-real.service` 不建
 - 无需 `systemctl set-environment`（simnow 凭证走 secrets.yaml）
 
@@ -922,6 +922,7 @@ sudo certbot --nginx -d 你的域名
 22. **账户目录缺 secrets.yaml 会 fallback 到源码占位符**：`_load_secrets()` 按 cwd → 源码 → home 查找，账户目录没配 secrets.yaml 就回退到源码目录的 `.example` 占位符（webhook「你的webhook」、app_id「cli_xxx」），导致飞书通知报 `incoming webhook access token invalid`、飞书控制假启动。每个账户目录必须配自己的 secrets.yaml。
 23. **策略状态汇总 window=0 是显示问题**：引擎状态汇总只读 `strategy.bg`（1 分钟 MyBarGenerator），双 BarGenerator 做 N 分钟周期时，`bg_window`（window=N）不被显示，状态里 `window=0` 不代表周期没生效。
 24. **nginx 反代前端 500 = /home/ubuntu 权限 750**：Ubuntu 家目录默认 `drwxr-x---`，nginx 的 www-data 用户进不去，`stat() .../dist/index.html` 报 `Permission denied`、首页 500。启用前先 `sudo chmod 711 /home/ubuntu`（只加执行位让 www-data 穿过，不暴露文件列表）。
+25. **Linux 账户目录名不能含中文（can not open CFlow file）**：vnpy_ctp 的 `ctp_gateway.py` 把 flow 路径 `.encode("GBK")` 后传给 C++ 库，账户目录名含中文（如 `模拟盘simnow`）时，GBK 字节与 Linux 文件系统 UTF-8 存的目录名对不上，CTP 抛 `RuntimeError: can not open CFlow file`、交易子进程崩溃重启循环，表现是「网页端没数据、交易没运行」。Windows 没这问题（CTP DLL 内部把 GBK 转回 Unicode）。修法：账户目录名改纯 ASCII（`实盘`→`real`、`模拟盘simnow`→`simnow`），同步改 unit 的 WorkingDirectory。
 
 ---
 
