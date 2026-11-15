@@ -87,7 +87,7 @@ nginx（部署后）：:443 唯一公网入口，静态 + 反代 8000
 
 2. **飞书启停的是交易子进程**（连 CTP 跑策略那个），不是父进程、不是 web。父进程（机器人寄居宿主）一直常驻。
 
-3. **飞书控制只实盘开**：`run_cta.py` 里 `if os.getenv("CTP_MODE", "real") == "real":` 才启动。simnow 进程 `CTP_MODE=simnow` 不满足，不启飞书控制端口，所以机器人天生只绑定实盘，不存在「识别错账户」。
+3. **飞书控制按账户各起一个**：实盘、模拟盘各配一个自建应用，端口由 `feishu_port` 决定（默认实盘 3000 / 模拟盘 3001）。每个终端只收到自己机器人的消息；指令里如果写了对方的账户，会回提示并且不执行。
 
 4. **「控制」和「通知」是两回事**：控制（@机器人 停/重启）只实盘有；通知（推消息）走 `feishu_webhook` 一个字段，实盘/模拟盘各账户目录的 secrets.yaml 各填各群的 webhook（靠目录隔离分群）。
 
@@ -146,7 +146,7 @@ vnpy 的 `.vntrader` 数据目录按「当前工作目录」解析（cwd 下有 
 
 ### 3.6 飞书（控制 + 通知）
 
-- **控制**（@机器人 停止/重启，自建应用）：只对实盘有意义，只实盘开
+- **控制**（@机器人 停止/重启，自建应用）：两个账户各一个，端口 3000/3001，@谁控谁
 - **通知**（群机器人 webhook）：`feishu_webhook` 一个字段，实盘/模拟盘各目录 secrets.yaml 各填各群 webhook（目录隔离分群），文案加 `[实盘]`/`[模拟]` 前缀
 
 ## 4. 监控数据库 monitor.db
@@ -162,7 +162,7 @@ vnpy 的 `.vntrader` 数据目录按「当前工作目录」解析（cwd 下有 
 | positions | 持仓快照 | strategy, account, vt_symbol, direction, volume, avg_price, pnl, trading_day, snapshot_time | 每次成交后 |
 | accounts | 账户资金 | account, accountid, balance, available, frozen, margin, pnl, snapshot_time | 资金事件 + 每 3s 快照 |
 | daily_pnl | 每日盈亏 | trading_day, strategy, account, realized_pl, cumulative_pl | 每日收盘归零时 |
-| strategy_status | 策略状态 | strategy, account, symbol, status, pos, long_pos, short_pos, pnl, parameters, variables, update_time | 每 3s 快照 |
+| strategy_status | 策略状态 | strategy, account, symbol, status, pos, pnl, parameters, variables, update_time | 每 3s 快照 |
 | logs | 日志 | ts, level, strategy, account, message | 每次写日志 |
 | system_metrics | 系统指标 | ts, cpu, mem, disk, uptime | monitor_interval 定时 |
 | klines | 1min K 线 | symbol, exchange, account, interval, datetime, open, high, low, close, volume | BarGenerator 合成 1min bar |
@@ -379,7 +379,7 @@ Desktop/vnpy/
 │   └── strategies/       策略副本（short_dual_ma 玉米做空）
 ├── 模拟盘simnow/       simnow 账户目录（非 git）——同上
 │   ├── .vntrader/        模拟配置+数据
-│   └── strategies/       策略副本（corn_scalper / dual_ma / save_bar）
+│   └── strategies/       策略副本（dual_ma / save_bar）
 └── monitor.db          共享监控库（MONITOR_DB_PATH 指向它，三进程共用）
     ├── monitor.db-shm   SQLite WAL 附属文件（自动生成，别手动删）
     └── monitor.db-wal
@@ -473,6 +473,8 @@ python ../vnpy-domestic/run_cta.py
 ```
 
 交易时段：周一~周五日盘 8:45–15:01、夜盘 20:45–23:05（非交易时段父进程不 spawn 子进程）。日志看账户目录 `.vntrader/log/vt_YYYYMMDD.log`。
+
+> ⚠️ `NIGHT_END = 23:05` **只覆盖 23:00 收盘的品种**（m/rb/SR/TA/v 等）。AU/AG/SC 夜盘到 02:30、SN 到 01:00——这些品种 23:05 后策略进程已退出，持仓在剩余夜里没有策略逻辑保护。要跑这类品种必须改 `NIGHT_END`（或把 `NIGHT_CROSS_MIDNIGHT` 设 True 并调整 `MIDNIGHT_END`）。
 
 ### 7.6 验证命令速查
 
@@ -908,11 +910,11 @@ sudo certbot --nginx -d 你的域名
 8. **broadcaster 空转**：无连接时跳过查库（`if not active: continue`）。
 9. **HTTPS 后 WS 用 wss**：前端按 `location.protocol` 自动切 ws/wss。
 10. **监控只读**：REST/WS 全部只读不下单；纯 HTTP 暴露公网必须上 nginx basic_auth，别把 8000 裸奔。
-11. **飞书控制只实盘开**：两个进程都起 3000 会抢端口。
+11. **飞书控制按账户分端口**：两个进程共用一个端口会抢，默认实盘 3000 / 模拟盘 3001（`feishu_port` 可改）。
 12. **实盘信息不落盘**：实盘 CTP 全走环境变量；模拟密码可进 secrets.yaml，但绝不写源码（公开仓库）。
 13. **依赖补 sqlalchemy**：pyproject 缺 `sqlalchemy>=2.0` 不补 import models 直接崩。
 14. **gitignore 漏洞先堵**：`.vntrader` 若已被跟踪，先 `git rm -r --cached` 再填真实密码；配置模板用 `.example` 提交、真实文件 gitignore。
-15. **vnpy AccountData 字段有限**：只有 balance/frozen/available，没保证金和盈亏字段；账户卡 margin/pnl 改由 3s 快照从持仓 + 最新价计算。
+15. **vnpy AccountData 字段有限**：只有 balance/frozen/available，没保证金和盈亏字段；账户卡 margin 由「持仓手数 × 成本价 × 合约乘数 × openctp 保证金率」估算（多/空分别取率，拉不到兜底 8%），pnl 由 CTP 持仓 `pos.pnl` 汇总。
 16. **字段名 snake_case 不转 camelCase**：前端直接用后端 Python 返回的字段名，省掉映射层。
 17. **lightweight-charts v4/v5 API 不同**：`addSeries(CandlestickSeries)`（v5）vs `addCandlestickSeries()`（v4）。
 18. **时间零转换**：后端已存北京时间字符串，前端直接显示，别再 `new Date()` 转一遍（带本地时区错乱）。
@@ -932,11 +934,11 @@ sudo certbot --nginx -d 你的域名
 
 | 优先级 | 方向 | 现状 → 改法 |
 |:--|:--|:--|
-| 最高 | 自动化测试 | 无 tests/ → 给 settle_close / 换月 / 逐日盯市 / normalize_vt_symbol 补 pytest |
+| ~~最高~~ ✅ | 自动化测试 | **已完成**：`tests/` 26 个用例（移仓 14 个场景 + 盈亏 + 保证金 + 同合约多策略） |
 | 高 | CI（GitHub Actions） | push 无自动检查 → 加 ci.yml 跑 pytest + ruff |
 | 中 | 密钥管理 | secrets.yaml 明文存飞书 token → 全走环境变量，secrets 只留 simnow 密码 |
-| 中 | 代码规范强制 | 无 ruff 门槛 → 加 ruff 配置 + CI 强制 |
+| ~~中~~ ✅ | 代码规范强制 | **已完成**：`[tool.ruff]` 配置 + `ruff check` 从 162 条收到 27 条（CI 待做） |
 | 中 | 可观测性 | 只有日志+飞书 → system_metrics 趋势图 + 阈值告警，后期 Prometheus/Grafana |
 | 高 | 风控独立 | 风控散在策略里 → 抽独立风控，下单前四道校验（单日亏损/敞口/频率/额度） |
 
-建议顺序：pytest 补核心测试 → CI + ruff → 密钥走环境变量 → 可观测性 → 风控独立。
+建议顺序：~~pytest 补核心测试~~ ✅ → CI（`ci.yml` 跑 pytest + ruff，ruff 配置已完成）→ 密钥走环境变量 → 可观测性 → 风控独立。

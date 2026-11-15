@@ -3,6 +3,8 @@ import base64
 import hashlib
 import hmac
 import platform
+import queue
+import threading
 import time
 import urllib.parse
 from datetime import datetime
@@ -96,6 +98,16 @@ class NotificationManager:
 
         self.log_callback = None
 
+        # ── 异步发送：交易事件线程只入队，HTTP 在后台线程做 ──
+        # 队列有界：webhook 挂了/被限流时丢最旧的，绝不反压交易线程。
+        self._queue: queue.Queue = queue.Queue(maxsize=200)
+        self._closed = threading.Event()
+        self._worker_local = threading.local()
+        self._thread = threading.Thread(
+            target=self._worker, name="notify-worker", daemon=True
+        )
+        self._thread.start()
+
     def set_log_callback(self, callback):
         """设置日志回调函数"""
         self.log_callback = callback
@@ -171,18 +183,27 @@ class NotificationManager:
     # 统一发送接口
     # ============================================================
     def send_text(self, text: str, force_type: str | None = None) -> bool:
-        """
-        发送文本消息
+        """把消息放入发送队列（**不阻塞调用方**）。
 
-        Parameters
-        ----------
-        text : 消息内容（由调用方生成）
-        force_type : 强制使用的通知类型（"dingtalk"/"feishu"），不指定则使用默认配置
-
-        Returns
-        -------
-        bool : 是否发送成功
+        HTTP 在后台线程 `_worker` 里做，交易事件线程只做一次入队。返回值表示
+        "是否成功入队"，不代表已送达；队列满（webhook 挂了/被限流）时丢弃最旧的
+        一条并返回 False，绝不反压交易线程。
         """
+        if self._closed.is_set():
+            return False
+        try:
+            self._queue.put_nowait((text, force_type))
+            return True
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            self._log("通知队列已满，丢弃最旧的一条")
+            return False
+
+    def _send_now(self, text: str, force_type: str | None = None) -> bool:
+        """同步发送（原 send_text 实现；只在 worker 线程或测试里调用）。"""
         notify_type = force_type or self.notify_type
 
         if notify_type == "dingtalk":
@@ -197,6 +218,42 @@ class NotificationManager:
         else:
             self._log(f"未知的通知类型: {notify_type}")
             return False
+
+    def _worker(self) -> None:
+        """后台发送线程：串行取队列，单条异常不影响后续。"""
+        self._worker_local.active = True
+        while True:
+            try:
+                item = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._closed.is_set():
+                    break
+                continue
+            if item is None:
+                break
+            text, force_type = item
+            try:
+                self._send_now(text, force_type)
+            except Exception as exc:  # 兜底：worker 线程绝不能死
+                self._log(f"通知发送异常：{exc}")
+
+    def is_worker_thread(self) -> bool:
+        """当前线程是不是通知 worker（引擎 write_log 用它挡住"发送失败回环"）。"""
+        return bool(getattr(self._worker_local, "active", False))
+
+    def close(self, timeout: float = 5.0) -> None:
+        """退出前把队列里的消息尽量发完（最多等 timeout 秒）。"""
+        if self._closed.is_set():
+            return
+        deadline = time.time() + timeout
+        while not self._queue.empty() and time.time() < deadline:
+            time.sleep(0.05)
+        self._closed.set()
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass
+        self._thread.join(timeout=1.0)
 
     # ============================================================
     # 辅助方法：格式化各类消息
@@ -342,15 +399,15 @@ class NotificationManager:
             return
 
         rolled = [n for n, r in results.items() if r == "rolled"]
-        blocked = [n for n, r in results.items() if r == "blocked"]
+        pending = [n for n, r in results.items() if r in ("pending", "blocked")]
         no_change = [n for n, r in results.items() if r == "no_change"]
         failed = [n for n, r in results.items() if r == "failed"]
 
         lines = []
         if rolled:
-            lines.append("🔄 已换月：" + "、".join(rolled))
-        if blocked:
-            lines.append("⚠️ 主力已变化但持仓不为零：" + "、".join(blocked))
+            lines.append("🔄 已换月（空仓）：" + "、".join(rolled))
+        if pending:
+            lines.append("⏳ 待盘中移仓（有持仓）：" + "、".join(pending))
         if no_change:
             lines.append("✅ 无需换月：" + "、".join(no_change))
         if failed:

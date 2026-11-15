@@ -1,9 +1,11 @@
 """Prune old snapshot rows from monitor.db.
 
 Deletes snapshot rows older than KEEP_DAYS, always keeping the latest row
-per key so the realtime panel never loses its current state. Logs an INFO
-record of the prune to the logs table (kept forever). K-line, trades, orders,
-positions, daily_pnl and logs tables are not touched.
+per key so the realtime panel never loses its current state. Also prunes
+settlements by trading_day (keeping the latest row per account+symbol, which
+is all the mark-to-market logic ever reads). Logs an INFO record of the prune
+to the logs table (kept forever). K-line, trades, orders, positions, daily_pnl
+and logs tables are not touched.
 
 Usage:
     python cleanup_monitor.py [db_path] [keep_days] [--vacuum]
@@ -17,6 +19,13 @@ from datetime import datetime, timedelta
 DEFAULT_DB = os.getenv(
     "MONITOR_DB_PATH", os.path.join(os.path.expanduser("~"), "vnpy-data", "monitor.db")
 )
+
+def _has_table(conn, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
 
 SNAPSHOT_TABLES = [
     ("accounts", "snapshot_time", ["account"]),
@@ -48,6 +57,20 @@ def prune(db_path: str, keep_days: int, vacuum: bool) -> None:
             ).rowcount
             total += deleted
             print(f"{table}: deleted {deleted}")
+
+        # settlements：trading_day 是日期字符串，按日期比；保留每个
+        # (account, symbol) 的最新一条（盯市只需要最近一条，删了也能重拉）
+        if _has_table(conn, "settlements"):
+            date_boundary = (datetime.now() - timedelta(days=keep_days)).strftime(
+                "%Y-%m-%d"
+            )
+            deleted = conn.execute(
+                "DELETE FROM settlements WHERE trading_day < ? AND id NOT IN ("
+                "SELECT MAX(id) FROM settlements GROUP BY account, symbol)",
+                (date_boundary,),
+            ).rowcount
+            total += deleted
+            print(f"settlements: deleted {deleted}")
 
         # 记录清理动作到 logs 表（logs 永久保留）
         conn.execute(

@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from bisect import bisect_right
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -168,7 +168,7 @@ class RolloverTable:
 
     # ---------- 加载与校验 ----------
     @classmethod
-    def load(cls, path: str | Path) -> "RolloverTable":
+    def load(cls, path: str | Path) -> RolloverTable:
         with open(path, encoding="utf-8") as f:
             return cls(json.load(f))
 

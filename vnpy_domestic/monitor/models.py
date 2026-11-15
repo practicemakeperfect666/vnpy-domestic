@@ -132,8 +132,6 @@ class StrategyStatus(Base):
     symbol: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(16))
     pos: Mapped[float] = mapped_column(Float, default=0)
-    long_pos: Mapped[float] = mapped_column(Float, default=0)
-    short_pos: Mapped[float] = mapped_column(Float, default=0)
     pnl: Mapped[float] = mapped_column(Float, default=0)
     parameters: Mapped[dict] = mapped_column(JSON, default=dict)
     variables: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -224,4 +222,24 @@ class Contract(Base):
     product: Mapped[str] = mapped_column(String(32), default="")
     size: Mapped[float] = mapped_column(Float, default=0)
     pricetick: Mapped[float] = mapped_column(Float, default=0)
+    # 保证金率（小数，0.06 = 6%），来自 openctp 合约字典；0 表示未知
+    margin_rate: Mapped[float] = mapped_column(Float, default=0)
+    update_time: Mapped[str] = mapped_column(String(32))
+
+
+class Settlement(Base):
+    """Daily settlement price per contract (the exchange's day VWAP).
+
+    Fetched from the exchange daily bar at process start; used as the
+    mark-to-market cost basis for overnight positions (逐日盯市).
+    One row per (account, trading_day, symbol).
+    """
+
+    __tablename__ = "settlements"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    account: Mapped[str] = mapped_column(String(16), index=True, default="")
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    trading_day: Mapped[str] = mapped_column(String(16), index=True)
+    price: Mapped[float] = mapped_column(Float)
     update_time: Mapped[str] = mapped_column(String(32))

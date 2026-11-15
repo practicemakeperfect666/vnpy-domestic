@@ -57,7 +57,7 @@ class TradingTime:
             return []
 
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
+            with open(self.config_path, encoding="utf-8") as f:
                 config = json.load(f)
             print(f"✅ 配置文件加载成功，包含 {len(config)} 个策略")
         except Exception as e:
@@ -142,7 +142,7 @@ class TradingTime:
                 time_begin = seg.get("TimeBegin", "")
                 hour = int(time_begin.split(":")[0]) if time_begin else 0
 
-                if 18 <= hour or hour < 6:
+                if hour >= 18 or hour < 6:
                     night_segments.append(seg)
                 else:
                     day_segments.append(seg)

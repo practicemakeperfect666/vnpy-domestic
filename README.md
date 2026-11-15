@@ -2,7 +2,10 @@
   <br>
   <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python" alt="Python">
   <img src="https://img.shields.io/badge/vnpy-4.4.0-blue?style=flat-square" alt="vnpy">
-  <img src="https://img.shields.io/badge/version-0.2.1-brightgreen?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/vnpy__ctastrategy-1.4.1-blue?style=flat-square" alt="vnpy_ctastrategy">
+  <img src="https://img.shields.io/badge/vnpy__ctp-6.7.11.4-blue?style=flat-square" alt="vnpy_ctp">
+  <img src="https://img.shields.io/badge/vnpy__sqlite-1.1.3-blue?style=flat-square" alt="vnpy_sqlite">
+  <img src="https://img.shields.io/badge/version-0.2.2-brightgreen?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="License">
   <br><br>
 
@@ -13,6 +16,21 @@
 </div>
 
 ---
+
+## v0.2.2 更新（2026-11）
+
+- **结算价入库（settlements）**：新增按账户区分的 `settlements` 表；启动时用交易所日线（akshare `get_futures_daily`）取上一交易日结算价，写库并推送手机，失败自动回退 CTP 持仓成本价
+- **盈亏双口径**：策略累计盈亏 = Σ trade_rounds（开仓价）+ 浮动（开仓价）；日内权益曲线 = 当日已实现 + 浮动（都按昨结算逐日盯市）。两套数字各司其职，不再混用
+- **飞书控制按账户（可分别启停）**：实盘/模拟盘各一个自建应用、各占一个端口（`feishu_port`，默认 3000/3001），@谁控谁；两个账户是两个独立父进程，**停实盘不影响模拟盘，反之亦然**；指令里写错账户只提示不执行
+- **保证金率走 openctp**：启动时从 `dict.openctp.cn/instruments` 拉全市场合约保证金率（多/空分别取，合约缺失按品种中位数），账户卡不再写死 8%；拉取失败自动兜底并在日志里提示；镜像地址可用环境变量 `OPENCTP_INSTRUMENTS_URL` 覆盖
+- **手动停止持久化**：`@机器人 停止` 写 `.vntrader/.manual_stop`，systemd 拉起后仍保持停止，需显式 `重启`
+- **稳定性**：通知改异步队列（交易线程零阻塞）、事件线程看门狗（300 秒无 CTP 事件自动重启）、三个事件 handler 异常兜底
+- **清理**：`scripts/cleanup_monitor.py` 增加 `settlements` 清理（保留每账户每合约最新一条）
+- **换月表自更新闭环**：新增 `scripts/rollover_check.py`（约 20 秒确认主力有没有变）+ `scripts/rollover_daily.py`（只取最近 12 天日线、只更新在交易的品种，约 3 秒）+ `rollover_daily.bat`；`run_cta.py` 内置守护线程每交易日 17:30 先 check、确认要换月才 update，成功/失败都推飞书。不再依赖回测仓 `daily.py`，也不再依赖 git 分发（回测仓生成仍可作基线）
+- **策略级持仓归属**：CTP 持仓没有策略标签，移仓手数改以本策略 `strategy_lots` 批次为准（`_strategy_position`），账户总量只做 `>=` 校验；同一合约跑多个**同向**策略不再互相吃仓。**锁仓（同合约同时持多空）不支持自动移仓**——会被判定为双向持仓跳过并告警，需手工处理；启动时检测到同合约多策略也会推告警
+- **平仓通知带开仓批次**：平仓消息里逐条列出「手数 / 开仓价 / 开仓时间 / 持有时间 / 该批盈亏」
+- **换月表提醒口径修正**：提醒时刻 15:10 → **18:00**（放到 17:30 自动更新之后），判据从「未覆盖当天」改成「落后超过 3 个自然日」——之前每个交易日、每个周一、每个节后首日都会误报
+- **代码规范**：新增 `[tool.ruff]` 配置（line-length 100，select E/F/I/UP/B/SIM/RUF/PIE/ISC），`ruff check` 从 162 条收到 27 条；补 `tests/test_multi_strategy.py`（同合约多策略移仓）
 
 ## v0.2.1 更新（2026-11）
 
@@ -26,9 +44,9 @@
 
 ## v0.2.0 更新（2026-10）
 
-- **双账户 Web 监控**：实盘 CTP + simnow 模拟盘双账户同时跑，Web 面板合并看，飞书通知分群、控制只对实盘。拆分三模块两库——交易核心 vnpy-domestic + 后端独立包 web-backend + 前端独立项目 web-frontend
+- **双账户 Web 监控**：实盘 CTP + simnow 模拟盘双账户同时跑，Web 面板合并看，飞书通知分群、每个账户各一个机器人（各占一个端口）。拆分三模块两库——交易核心 vnpy-domestic + 后端独立包 web-backend + 前端独立项目 web-frontend
 - **MonitorWriter 写库层**：queue + 独立线程异步落库，交易主循环零阻塞；埋点只在 RolloverCtaEngine 现有方法末尾追加，不动核心交易逻辑；SQLite + WAL + busy_timeout 处理双进程并发写
-- **monitor.db 监控库（14 张表）**：orders / trades / positions / accounts / account_positions / account_intraday_pnl / daily_pnl / strategy_status / strategy_intraday / logs / system_metrics / klines / trade_rounds / contracts，除 contracts 外全带 account 字段区分 real / simnow，时间统一北京时间字符串
+- **monitor.db 监控库（15 张表）**：orders / trades / positions / accounts / account_positions / account_intraday_pnl / daily_pnl / strategy_status / strategy_intraday / logs / system_metrics / klines / trade_rounds / contracts / settlements，除 contracts 外全带 account 字段区分 real / simnow，时间统一北京时间字符串
 - **web-backend 后端**：FastAPI + SQLAlchemy 2.0 只读 monitor.db，18 个 REST 接口 + WebSocket `/ws` 每 3 秒全量快照广播；后端不接 CTP、不碰交易进程，交易挂了照样查历史
 - **web-frontend 前端**：Vue3 + Vite + Element Plus + ECharts + lightweight-charts，纯 JS。策略维度首页（策略卡片）→ 策略详情页（净值 / 回撤 / K线 / 合约信息 / 账户持仓），另有 Dashboard / Orders / Logs；白底现代简洁、红涨绿跌（国内期货习惯）
 - **双账户隔离**：两个独立进程（一份代码靠 `CTP_MODE` 切配置），`.vntrader` 按 cwd 隔离，monitor.db 靠 `MONITOR_DB_PATH` 固定绝对路径共享；实盘凭证全走环境变量不落盘、simnow 走 secrets.yaml
@@ -47,7 +65,7 @@ vnpy-domestic 是一个面向国内期货实盘的 vnpy 扩展工具包。它不
 | 痛点 | 方案 |
 |:----|:-----|
 | 主力合约到期后要手动换月，错过行情 | `RolloverCtaEngine` 从**换月复权表**读主力；空仓直接切、有仓自动移仓（冻结→撤单→开新→平旧，失败回滚）|
-| 回测与实盘用不同算法判主力，两条线对不上 | 生成逻辑只在回测仓 `scripts/` 里，实盘只读同一份 `data/rollover.json` |
+| 回测与实盘用不同算法判主力，两条线对不上 | 两边读**同一份** `data/rollover.json`；基线由回测仓生成，交易机可自行增量更新（只追加、历史段不动） |
 | 集合竞价 tick 时间戳错位（20:59 → 21:00） | `MyBarGenerator` 时间戳自动校正 |
 | 午休/小节间歇无效 tick 干扰 K 线 | 非交易时段自动过滤 |
 | 跨交易段 volume 重复计算 | 段首全量 + 后续增量的增量模式 |
@@ -59,55 +77,66 @@ vnpy-domestic 是一个面向国内期货实盘的 vnpy 扩展工具包。它不
 
 | 模块 | 文件 | 职责 |
 |:----|:-----|:-----|
-| `RolloverCtaEngine` | `RolloverCtaEngine.py` | 自动换月 + 通知推送 + P&L 追踪 + CTP 断连监控 + 订单状态通知 |
+| `RolloverCtaEngine` | `RolloverCtaEngine.py` | 自动换月 + 通知推送 + P&L 追踪 + CTP 断连监控 + 订单状态通知 + openctp 保证金率 |
 | `MyBarGenerator` | `newbargenerator.py` | 增强 K 线合成 + 品种级交易时段管理 |
 | `NotificationManager` | `notification_manager.py` | 钉钉/飞书统一通知 + 账户报告（含挂单列表） |
 | `AKShare Datafeed` | `vnpy_akshare.py` | 免费 1 分钟 K 线数据源 |
 | `TradingTime Updater` | `update_trading_times.py` | 交易时段拉取与 CSV 持久化 |
-| `FeishuControl` | `feishu_http_control.py` | 飞书 HTTP 回调控制（@机器人 停止/重启） |
+| `FeishuControl` | `feishu_http_control.py` | 飞书 HTTP 回调控制（@机器人 停止/重启，按账户/端口） |
 | `PositionLots` | `position_lots.py` | 持仓批次 FIFO + 平今平昨规则 |
-| `CornScalperStrategy` | `strategies/corn_scalper.py` | 玉米刷盘口策略（MA 判向 + 盘口深度过滤 + 被套锁仓） |
 | `MonitorWriter` | `vnpy_domestic/monitor/writer.py` | 监控库异步写库（queue + 独立线程，交易主循环零阻塞） |
 | `Web Backend` | `web-backend/web_backend/` | FastAPI 只读监控后端（REST + WebSocket） |
 | `Web Frontend` | `web-frontend/` | Vue3 监控面板（双账户切换 + 策略详情 + K线） |
 
 ---
 
+## 文档
+
+| 文档 | 内容 |
+|:--|:--|
+| [docs/Linux部署.md](docs/Linux部署.md) | Ubuntu 服务器部署（systemd、CTP 凭证、防火墙） |
+| [docs/web监控与部署.md](docs/web监控与部署.md) | Web 面板（web-backend + web-frontend）部署与运维 |
+| [docs/飞书控制机器人.md](docs/飞书控制机器人.md) | 飞书自建应用机器人：创建、双账户、指令、排错 |
+| [docs/monitor-db数据表.md](docs/monitor-db数据表.md) | monitor.db 各表字段与用途 |
+| [docs/盈亏计算与数据流.md](docs/盈亏计算与数据流.md) | 盈亏口径、通知、前后端数据流 |
+| [docs/订单统计口径.md](docs/订单统计口径.md) | 订单状态追踪与活跃挂单统计 |
+
+---
+
 ## 安装
 
-**环境要求：** Python ≥ 3.10
+**环境要求：** Python ≥ 3.10（推荐 3.11 / 3.12）
 
-### 1. 安装 vnpy 框架
-
-```bash
-pip install vnpy
-pip install vnpy_ctastrategy vnpy_ctp vnpy_sqlite
-```
-
-- `vnpy` — 量化交易框架
-- `vnpy_ctastrategy` — CTA 策略引擎（`CtaEngine`、`CtaTemplate`）
-- `vnpy_ctp` — 上期技术 CTP 柜台接口
-- `vnpy_sqlite` — SQLite 数据库适配（vnpy 默认数据存储）
-
-### 2. 安装依赖
+### 1. 安装本包（含 vnpy 与全部依赖）
 
 ```bash
-pip install pyyaml requests akshare psutil pandas lark-oapi fastapi uvicorn sqlalchemy
-pip install -e ./web-backend   # 监控后端（可选；只在跑 Web 面板时需要）
+cd vnpy-domestic
+pip install -e .
 ```
 
-| 包 | 用途 |
-|:---|:-----|
-| `pyyaml` | 读取 `secrets.yaml` 通知配置 |
-| `requests` | 钉钉/飞书 HTTP 推送 |
-| `akshare` | 免费期货行情数据源 |
-| `psutil` | 系统硬件监控（CPU/内存/磁盘） |
-| `pandas` | CSV 读写与数据整理 |
-| `lark-oapi` | 飞书控制（@机器人 停止/重启） |
-| `fastapi` / `uvicorn` | 飞书 HTTP 回调服务 + Web 监控后端 |
-| `sqlalchemy` | Web 监控 monitor.db 表定义（交易进程埋点 + 后端读库共用） |
+`pyproject.toml` 已声明 vnpy 及以下依赖，一条命令装齐；`-e`（editable）模式改源码不用重装。
 
-### 3. 安装 TA-Lib
+| 包 | 版本 | 用途 |
+|:---|:---|:-----|
+| `vnpy` | ≥ 4.3.0 | 量化交易框架 |
+| `vnpy_ctastrategy` | ≥ 1.4.1 | CTA 策略引擎（`CtaEngine`、`CtaTemplate`） |
+| `vnpy_ctp` | ≥ 6.7.11.4 | 上期技术 CTP 柜台接口 |
+| `vnpy_sqlite` | ≥ 1.1.3 | SQLite 数据库适配（vnpy 默认数据存储） |
+| `pyyaml` | | 读取 `secrets.yaml` 通知配置 |
+| `requests` | | 钉钉/飞书 HTTP 推送 |
+| `akshare` | | 免费期货行情数据源 |
+| `psutil` | | 系统硬件监控（CPU/内存/磁盘） |
+| `pandas` | | CSV 读写与数据整理 |
+| `lark-oapi` | | 飞书控制（@机器人 停止/重启） |
+| `fastapi` / `uvicorn` | | 飞书 HTTP 回调服务 + Web 监控后端 |
+| `sqlalchemy` | | 监控库表定义（交易进程埋点 + 后端读库共用） |
+
+> Web 面板的后端是独立包，需要时再装：
+> ```bash
+> pip install -e ../web-backend
+> ```
+
+### 2. 安装 TA-Lib（可选）
 
 仅当使用 vnpy 原生的技术指标（非 `ArrayManager`）时需要。本项目策略用 `vnpy_ctastrategy` 自带的 `ArrayManager`，不需要 TA-Lib。
 
@@ -130,15 +159,6 @@ pip install TA-Lib
 brew install ta-lib
 pip install TA-Lib
 ```
-
-### 4. 安装本包
-
-```bash
-cd vnpy-domestic
-pip install -e .
-```
-
-`-e` 模式（editable install）确保修改源码后无需重新安装。
 
 ---
 
@@ -214,7 +234,11 @@ feishu_encrypt_key: ""               # 事件与回调 → Encrypt Key（没开�
 feishu_verification_token: "xxx"     # 事件与回调 → Verification Token（验签必填）
 feishu_bot_open_id: "ou_xxx"         # 机器人 open_id（@识别）
 feishu_host: "127.0.0.1"             # 监听地址，Linux 服务器改 0.0.0.0
+feishu_port: 3000                    # 控制端口：实盘 3000 / 模拟盘 3001（不填按账户默认）
 ```
+
+> 实盘、模拟盘**各自**一份 `.vntrader/secrets.yaml`、各自一个自建应用/机器人。
+> 飞书一个应用只能填一个回调地址，一个端口也只能被一个进程占用，所以两个账户不能共用一个应用。
 
 - `notify_type`：`dingtalk`（仅钉钉）、`feishu`（仅飞书）、`both`（同时推送）
 - 钉钉使用 HMAC-SHA256 签名认证，需配置 `webhook` 和 `secret`
@@ -222,20 +246,29 @@ feishu_host: "127.0.0.1"             # 监听地址，Linux 服务器改 0.0.0.0
 
 `feishu_webhook` 是通知用的【群机器人 webhook】，`feishu_app_*` 是控制用的【自建应用】——两套独立、互不影响。
 
-**飞书控制（可选）**：群里 @机器人 发「停止」/「重启」，控制实盘子进程启停。飞书控制跑在**父进程**（常驻，非交易时段也能 @机器人），「停止」杀子进程、「重启」重新 spawn 子进程（全新 CTP 连接 + 全新策略初始化）。不配置 `feishu_app_id` 则不启用，通知功能不受影响。HTTP 回调模式下飞书服务器回调 `/webhook/feishu`，run_cta 内置 uvicorn 监听 3000 端口：
+**飞书控制（可选，按账户）**：群里 @机器人 发「停止」/「重启」，控制**该机器人所属账户**的子进程启停。跑在**父进程**（常驻，非交易时段也能 @机器人）：
 
-- 本地 Windows：`npx localtunnel --port 3000` 内网穿透，后台回调地址填 `公网URL/webhook/feishu`
-- Linux 服务器：`feishu_host` 改 `0.0.0.0` + `ufw allow 3000`，回调地址填 `http://公网IP:3000/webhook/feishu`
+> 实盘和模拟盘是**两个独立父进程**（各自 cwd / `CTP_MODE` / 端口 / 机器人），所以可以**分别启停**：`@实盘机器人 停止` 只停实盘，模拟盘继续交易；反过来也一样。停一个账户不会影响另一个账户的子进程、策略和持仓。
 
-**@机器人 指令**（群里 @机器人 发送）：
+- 「停止」让子进程正常退出（撤挂单 → 日报 → 归零），并落盘 `<账户>/.vntrader/.manual_stop`；之后**即使 systemd 把父进程拉起，也不会自动启动子进程**；
+- 「重启」清掉标记、重新 spawn 子进程（全新 CTP 连接 + 策略初始化）；
+- 不配 `feishu_app_id` 不启用，通知不受影响；`feishu_verification_token` 为空时出于安全**不启动控制**；
+- 端口由 `feishu_port` 决定，不填按账户默认：实盘 3000、模拟盘 3001。
 
-| 指令 | 动作 | 机器人回复 |
-|------|------|-----------|
-| `@机器人 停止` | 停止子进程（父进程 terminate 子进程，`manual_stop` 阻止自动重启）| 先回「收到停止指令，执行中...」，完成后回「停止已完成」|
-| `@机器人 重启` | 重启整个子进程（杀旧子进程 → 重新 spawn，全新 CTP 连接 + 策略初始化）| 先回「收到重启指令，执行中...」，完成后回「重启已完成」|
-| 其他消息 | 不执行 | 「收到信息」|
+指令可以只写动作（机器人身份就是账户），也可以带账户词做防呆：
 
-只响应 @机器人 的文本消息，忽略 3 秒前旧消息。
+| 群消息 | 结果 |
+|------|------|
+| `@实盘机器人 停止` / `@实盘机器人 实盘停止` | 停实盘子进程、写 `.manual_stop`，回「停止已完成」 |
+| `@实盘机器人 模拟盘停止` | **不执行**，回「你 @ 的是实盘机器人，模拟盘的操作请 @模拟盘机器人」 |
+| `@实盘机器人 实盘模拟盘停止` | **不执行**，回「指令里同时出现了实盘和模拟盘，请只写一个」 |
+| `@机器人 停一下` | 回用法提示（没识别出停止/重启） |
+| `@实盘机器人 重启` | 清标记、重新起子进程，回「重启已完成 (PID xxx)」 |
+
+部署：
+
+- 本地 Windows：`npx localtunnel --port 3000`（模拟盘再开一条 `--port 3001`），回调填 `公网URL/webhook/feishu`
+- Linux 服务器：`feishu_host` 改 `0.0.0.0` + `ufw allow 3000`（模拟盘再加 `ufw allow 3001`），回调填 `http://公网IP:<端口>/webhook/feishu`
 
 飞书后台「事件与回调」→「加密策略」区域，两个字段挨在一起：
 - `Encrypt Key`（加密密钥）→ 填 `feishu_encrypt_key`，没开加密可留空
@@ -331,7 +364,7 @@ python run_cta.py
 
 `run_parent()` 先确认环境变量存在，然后 `run_and_save()` 更新交易时段，最后按 `check_trading_period()` 的时段判断启停子进程。子进程内 `load_ctp_setting()` 在函数内读取环境变量，避免 Windows spawn 的模块级重入问题。
 
-Linux 服务器部署（systemd 守护 + CTP 凭证环境变量注入）见 `vnpy-domestic-Linux部署.md`。
+Linux 服务器部署（systemd 守护 + CTP 凭证环境变量注入）见 [docs/Linux部署.md](docs/Linux部署.md)。
 
 ---
 
@@ -342,23 +375,49 @@ Linux 服务器部署（systemd 守护 + CTP 凭证环境变量注入）见 `vnp
 继承 `CtaEngine`，叠加自动换月、成交通知、P&L 追踪和 CTP 断连监控。
 
 **换月逻辑（读表，与回测同源）：** 主力合约来自 `data/rollover.json`——由**回测仓**
-`vnpy_backtester/scripts/publish.py`（或 `daily.py` 一键跑）生成，实盘只读不生成。
+`vnpy_backtester/scripts/publish.py` 整份生成并分发；日常由**交易机自己增量更新**
+（`scripts/rollover_check.py` 确认主力是否变化 → `scripts/rollover_daily.py` 只取最近 12 天
+日线、只更新在交易的品种，原子替换），回测仓不再是必需环节。
 `_fetch_main_contract(variety)` 取表里该品种的最后一段，即当前主力；表里存库内格式
 （`m2701`/`SR2701`），经 `normalize_vt_symbol` 转成 CTP InstrumentID 后使用。
 
 > **表的位置与更新**
 > - 默认 `<仓库根>/data/rollover.json`，可用环境变量 `ROLLOVER_TABLE` 覆盖
-> - 引擎按文件 mtime **热加载**：`daily.py` 覆盖后无需重启
+> - 引擎按文件 mtime **热加载**：`rollover_daily.py`（或回测仓 `daily.py`）覆盖后无需重启
 > - `data_through` 超过 **10 天**视为过期，拒绝拿它判主力（记 ERROR 日志），避免用旧表猜
 > - 表里没有的品种直接返回 `None`，**不会**静默退回新浪
-> - **每日更新提醒**：收盘后 15:10 若表的 `data_through` 还没覆盖当天，推一条
->   `📅 换月表待更新`（带落后天数和要跑的命令），每天只推一次；节假日不误报——
+> - **每日更新提醒**：收盘后 **18:00**（放在 17:30 自动更新之后）若表的 `data_through`
+>   落后超过 **3 个自然日**，推一条 `📅 换月表待更新`，每天只推一次；节假日不误报——
 >   要求"当天确实有过市场活动"（CTP 有 tick/account 事件）才会提醒
+> - 判据不能用「是否覆盖当天」：`data_through` 语义上永远是**上一个交易日**，
+>   用 `>= today` 判断会让每个交易日、每个周一、每个节后首日都误报
 
-**换月时机：** 三个入口——初始化时静默记录（`_check_rollover_for_init`）、初始化后汇总推送
-（`send_rollover_init_summary`）、运行中定时检查（`process_timer_event`，默认每 60s，
-只在交易时段 09:05–14:45 / 21:05–22:55 / 00:05–02:20）。平仓后若恰好空仓，`process_trade_event`
-里也会立即补一次检查。
+**换月时机：** 只在**初始化时**判定一次（`_check_rollover_for_init`）：读表 → 比合约 →
+空仓立即切；有持仓则登记 `_pending_rollover`，等盘中窗口（09:05–14:45 / 21:05–22:55 /
+00:05–02:20）内、新合约有行情时执行一次（`_run_pending_rollovers`，每策略只执行一次，
+失败不重试、告警交人工）。启动汇总由 `send_rollover_init_summary` 推送。
+运行期不轮询主力，平仓后也不补检查——但**子进程每个交易时段都会重启**（父进程按
+`check_trading_period()` 起停：日盘 08:45、夜盘 20:45），所以**每个交易日判定 2 次**，
+不会因为连续跑而漏掉换月。
+
+**同一合约跑多个策略（含锁仓）：** CTP 持仓**没有策略标签**——
+`_ctp_position(vt_symbol)` 返回的是账户在该合约上的**总量**，所以引擎用 `strategy_lots`
+（本策略逐笔开仓批次）当**策略级持仓归属表**：
+
+- **移仓手数以本策略批次为准**（`_strategy_position`）：账户总量只做 `>=` 校验，不够就中止
+  移仓并告警。同一合约跑多个**同向**策略时，各自只搬自己的手数，不再互相吃仓。
+- **🔴 不支持锁仓（同一合约同时持多空）**：`_ctp_position` 一旦看到 `long > 0 且 short > 0`，
+  移仓直接跳过并推一条「多空双向持仓，请手工处理」。两个原因：
+  1. 判断是**账户级**的——A 持多、B 持空时，A 单独移仓也会被误判成锁仓；
+  2. DCE 等**净持仓交易所** CTP 只回一条 `Direction.NET`，多空已合并，**无从归因**。
+
+  锁仓类策略（趋势 + 反向对冲、网格双边成交）只能**手工移仓**，或拆到两个 CTP 账户。
+- **批次缺失时退化为账户口径**：`strategy_lots` 为空（`cta_strategy_data.json` 被清、
+  在 CTP 客户端手工建过仓、首次上线尚未成交）时，移仓退回按账户总量执行并写一条日志——
+  **这种情况下同合约多策略仍可能吃错仓**。
+- **启动告警**：检测到同合约多策略会推一条 🚨，但不阻止启动（有时只是临时对比）。
+- **想要完全隔离**：一个策略一个 CTP 账户，或同品种跑不同月份合约。同一账户 + 同一合约 +
+  多个策略，从交易所层面就没有"策略"这个概念，代码补不上。
 
 **空仓换月：** `get_contract` 验证新合约存在 → 切 `vt_symbol` + 重新 `on_init` → 恢复变量
 （**丢弃价格类变量**：`entry_price`/`intra_trade_high`/`atr`/`ma20` 等旧点位带到新合约会立刻
@@ -370,9 +429,9 @@ Linux 服务器部署（systemd 守护 + CTP 凭证环境变量注入）见 `vnp
 |:---|:---|:---|
 | 🔒 冻结 | `_migrating` 加锁，策略下单全部丢弃 | — |
 | 🧹 撤单 | `cancel_all` 撤掉全部挂单 | 继续 |
-| 🟢 开新 | 对手价**超 3 跳**开等量仓（`_send_manual` 绕过策略直发） | 回滚（无需平旧） |
+| 🟢 开新 | 对手价**超 3 跳**开等量仓（`_send_manual` 绕过 `strategy.vt_symbol` 直发，但登记策略映射，成交按普通开平仓记账） | 回滚（无需平旧） |
 | 🔵 平旧 | 按交易所规则拆平昨/平今（SHFE/INE）或 `CLOSE` | 平掉新仓回滚 |
-| ✅ 完成 | 切合约 + 重建状态 + 解冻 + 恢复运行 | — |
+| ✅ 完成 | 切合约 + 对账（盈亏已由成交回报记账，不再手工结算）+ 解冻 + 恢复运行 | — |
 
 **保护机制：**
 
@@ -388,9 +447,8 @@ Linux 服务器部署（systemd 守护 + CTP 凭证环境变量注入）见 `vnp
   （事件线程）执行 `stop → 切合约 → start → 解冻`，保证 `on_init/on_start` 和 `on_bar`
   永远在同一条线程上串行；成交到切换之间最多等 1 秒，策略保持冻结
 - 每腿 3 秒超时，成交数量不足即判定失败
-- 失败后 **5 分钟冷却**，不会每分钟反复下单
 - 冻结用 `try/finally` 解锁，切合约抛异常也不会把策略冻死
-- 双向锁仓（多空各持一手）不自动移仓，直接告警要求手工处理
+- 账户层多空双向持仓（多空各持一手）不自动移仓，直接告警要求人工处理
 - 移仓过程记 `write_log`（进 vnpy 日志 + monitor.db，失败自动升 ERROR 并额外告警）
 
 **双尺子：指标用复权价（可选，默认关）**
@@ -427,10 +485,7 @@ set ROLLOVER_ADJUST_PRICES=1
 > 3. 策略内部算出的盈亏是**等比例放大**（真实盈亏 × 因子），不再有假盈利，但绝对点数止损
 >    （如"止损 20 点"）实际生效为 `20 / 因子` 点，需要按因子调整参数
 
-**锁仓判断：** `_has_position` 不只看净持仓 `pos`，也看 `long_pos`/`short_pos`——锁仓策略
-（多空各一手、净持仓 0）不会被误判成空仓而直接换月。
-
-**盈亏统计：** 平仓成交按交易所规则（`settle_close`）匹配持仓批次，推送本次盈亏与累计盈亏（点差）；平仓单挂出时附预估盈亏（挂单价 vs 开仓成本价）。累计盈亏按交易日统计，每日收盘归零（隔夜持仓按逐日盯市已结算，次日从 0 起算）。
+**盈亏统计：** 平仓成交按交易所规则（`settle_close`）匹配持仓批次，推送本次盈亏与累计盈亏（元）；平仓单挂出时附预估盈亏（挂单价 vs 开仓成本价）。累计盈亏按交易日统计，每日收盘归零（隔夜持仓按逐日盯市已结算，次日从 0 起算）。
 
 **订单通知：**
 
@@ -468,21 +523,26 @@ set ROLLOVER_ADJUST_PRICES=1
 
 ### FeishuControl（飞书控制）
 
-可选功能，配置 `feishu_app_id` 后启用。HTTP 回调模式下群里 @机器人 发送「停止」/「重启」控制实盘子进程启停，跑在父进程（常驻，非交易时段也能 @机器人）。`run_cta.py` 内置 uvicorn 监听 3000 端口，回调地址 `/webhook/feishu`。验签用 `verification_token`（必填），`message_id` 去重防重复触发，reply 直连 `open.feishu.cn`（绕过 Clash 代理）。详见上文「配置 → secrets.yaml → 飞书控制」；从 0 到 1 的机器人创建/部署教程见 `vnpy-domestic-飞书控制机器人.md`。
+可选功能，配置 `feishu_app_id` 后启用。**每个账户一个机器人**：实盘、模拟盘各一套自建应用，端口各占一个（`feishu_port`，默认 3000 / 3001），群里 @谁就控制谁。跑在父进程（常驻，非交易时段也能 @机器人），回调地址 `/webhook/feishu`。
+
+- `on_message` 把指令解析成动作后入队；指令里可以带「实盘/模拟盘」做防呆，写错机器人、或同时写了两个，都只回提示不执行；
+- 回复由父进程主循环发（回调必须 3 秒内返回），`message_id` 去重防重复触发；
+- `verification_token` 为空时出于安全不启动控制（防伪造回调）；
+- 「停止」会把标记落盘 `.vntrader/.manual_stop`，父进程重启后仍保持停止，需 @机器人 重启 恢复。
+
+详见上文「配置 → secrets.yaml → 飞书控制」；从 0 到 1 的创建/部署教程见 [docs/飞书控制机器人.md](docs/飞书控制机器人.md)。
 
 ### PositionLots（持仓批次）
 
 `settle_close(lots, exchange, offset, qty)` 按交易所规则平仓：DCE/CZCE/GFEX 先开先平、CFFEX 先平今、SHFE/INE 平今平昨（涨停先平昨）。`trading_day(dt)` 提供交易日判定。逐日盯市核算中，历史仓按昨结算、当日仓按开仓价。
-
-### CornScalperStrategy
-
-玉米刷盘口策略。MA 判方向，盘口一买一卖赚价差；被套开反向锁仓，等盘口回成本价解套。多空分记 `long_pos`/`short_pos`（锁仓净持仓 0 不误判无仓）。详见 `strategies/corn_scalper.md`。
 
 ---
 
 ## 守护进程
 
 `run_cta.py` 采用父子双进程。父进程按交易时段启停子进程，子进程崩溃自动重启（最多 5 次）。交易时段判断：周一~周五 8:45–15:01 或 20:45–次日 2:45，周六凌晨延续夜盘，周日晚 20:45 后准备开盘。
+
+实盘、模拟盘各跑一份 `run_cta.py`（不同 cwd / `CTP_MODE` / 端口），是两个互不影响的守护进程，可以分别启停。
 
 ```
 run_child()
@@ -500,7 +560,7 @@ run_child()
 
 ## Web 监控（双账户）
 
-实盘 + simnow 双账户同时跑，Web 面板合并看。链路：交易进程埋点写 monitor.db → web-backend 只读查库 → web-frontend 展示。飞书通知分群、控制只对实盘。
+实盘 + simnow 双账户同时跑，Web 面板合并看。链路：交易进程埋点写 monitor.db → web-backend 只读查库 → web-frontend 展示。飞书通知分群、每个账户各一个机器人（各占一个端口）。
 
 ### 架构
 
@@ -522,6 +582,7 @@ run_child()
 - **写**：交易进程 RolloverCtaEngine 各事件回调末尾埋点，`MonitorWriter` 用 queue + 独立线程异步落库（不阻塞交易主循环）
 - **读**：web-backend 只读 monitor.db，18 个 REST 接口 + WebSocket `/ws` 每 3 秒全量快照广播；后端不接 CTP、不碰交易进程，交易挂了照样查历史
 - **展示**：web-frontend 策略维度首页 → 策略详情页；REST 填历史全量、WS 推增量
+- **保证金**：启动时拉 `dict.openctp.cn/instruments` 的 `Long/ShortMarginRatioByMoney`，按合约取率（缺失按品种中位数，再兜底 8%）；账户卡按「手数 × 成本价 × 乘数 × 保证金率」估算，`contracts.margin_rate` 同步给前端合约卡
 
 ### 本地跑法
 
@@ -539,14 +600,14 @@ npm run dev        # http://localhost:5173，/api /ws 已代理到 8000
 
 ### 数据清理
 
-monitor.db 快照表（accounts / strategy_status / account_positions / account_intraday_pnl / system_metrics）每 3s 一条会持续膨胀。用 `scripts/cleanup_monitor.py` 定期清理——删 10 天前、保留每 key 最新一条（实时面板不丢状态）。事件表（orders / trades / trade_rounds）、日频表（daily_pnl / strategy_intraday）、基础表（klines / contracts / logs）永久保留；每次清理写一条日志进 logs 表留痕。
+monitor.db 快照表（accounts / strategy_status / account_positions / account_intraday_pnl / system_metrics）每 3s 一条会持续膨胀。用 `scripts/cleanup_monitor.py` 定期清理——删 10 天前、保留每 key 最新一条（实时面板不丢状态）；`settlements` 按 `trading_day` 一起清，保留每账户每合约最新一条（盯市只需要最近一条，删了下次启动也会重新拉）。事件表（orders / trades / trade_rounds）、日频表（daily_pnl / strategy_intraday）、基础表（klines / contracts / logs）永久保留；每次清理写一条日志进 logs 表留痕。
 
 ```bash
 python scripts/cleanup_monitor.py            # 默认删 10 天前
 python scripts/cleanup_monitor.py --vacuum   # 删完回收空间（需交易进程停止）
 ```
 
-完整方案 / 前端开发 / 运行部署说明见 `web端监控使用手册.md`。
+完整方案 / 前端开发 / 运行部署说明见 [docs/web监控与部署.md](docs/web监控与部署.md)。
 
 ---
 
@@ -556,10 +617,15 @@ python scripts/cleanup_monitor.py --vacuum   # 删完回收空间（需交易进
 vnpy-domestic/
 ├── run_cta.py                          ← 实盘入口（守护进程）
 ├── README.md                           ← 本文件
-├── vnpy-domestic-Linux部署.md           ← Linux 服务器部署
-├── vnpy-domestic-web端监控使用手册.md    ← Web 面板部署/运行说明
-├── vnpy-domestic-飞书控制机器人.md      ← 飞书控制机器人部署
 ├── pyproject.toml                      ← 包配置
+├── docs/                               ← 说明文档（长文都放这里）
+│   ├── README.md                       ← 文档索引
+│   ├── Linux部署.md
+│   ├── web监控与部署.md
+│   ├── 飞书控制机器人.md
+│   ├── monitor-db数据表.md
+│   ├── 盈亏计算与数据流.md
+│   └── 订单统计口径.md
 ├── .gitignore                          ← 保护 .vntrader/
 │
 ├── .vntrader/                          ← 运行时配置（gitignore 保护）
@@ -569,16 +635,23 @@ vnpy-domestic/
 │   └── trading_times.csv               ← 交易时段（自动更新）
 │
 ├── data/
-│   └── rollover.json                   ← 换月复权表（回测仓生成，实盘只读）
+│   └── rollover.json                   ← 换月复权表（回测仓生成基线，交易机可增量更新）
+│
+├── scripts/
+│   ├── cleanup_monitor.py              ← monitor.db 清理（按天删历史快照）
+│   ├── rollover_check.py               ← 换月表：确认主力有没有变（约 20 秒，只读）
+│   ├── rollover_daily.py               ← 换月表：增量更新 + 飞书通知 + 日志
+│   └── rollover_daily.bat              ← 每日更新入口（计划任务/手动）
 │
 ├── vnpy_domestic/
 │   ├── __init__.py                     ← 导出 MyBarGenerator，注册 akshare 别名
 │   ├── rollover/
 │   │   ├── __init__.py                 ← 导出 RolloverTable 等读表接口
-│   │   └── table.py                    ← 换月复权表读取（与回测仓 rollover_table.py 逐字节一致）
+│   │   ├── table.py                    ← 换月复权表读取（与回测仓 rollover_table.py 逐字节一致）
+│   │   └── core.py                     ← 换月算法纯函数（与回测仓 rollover_core.py 逐字节一致）
 │   ├── monitor/
 │   │   ├── __init__.py                 ← 导出 models + MonitorWriter
-│   │   ├── models.py                   ← monitor.db 14 张表（写侧）
+│   │   ├── models.py                   ← monitor.db 15 张表（写侧）
 │   │   └── writer.py                   ← MonitorWriter 写库（queue + 独立线程）
 │   ├── trader/
 │   │   ├── newbargenerator.py          ← MyBarGenerator + 交易时段模块
@@ -591,8 +664,6 @@ vnpy-domestic/
 │       └── RolloverCtaEngine.py        ← 自动换月 + 通知 + P&L + 断连监控
 │
 ├── strategies/
-│   ├── corn_scalper.py                 ← 玉米刷盘口策略
-│   ├── corn_scalper.md                 ← 策略详细文档
 │   └── dual_ma.py                      ← 双均线策略
 │
 └── scripts/

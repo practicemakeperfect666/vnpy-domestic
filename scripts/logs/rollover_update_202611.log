@@ -1,0 +1,23 @@
+
+======================================================================
+[2026-11-15 17:58:54] 换月复权表自动更新开始
+表: C:\Users\29523\Desktop\vnpy\vnpy-domestic\data\rollover.json
+表: C:\Users\29523\Desktop\vnpy\vnpy-domestic\data\rollover.json
+anchor=2026-09-01  data_through=2026-11-11  generated_at=2026-11-11T23:14:03+08:00
+交易品种（来自 cta_strategy_setting.json）：M、RB、SR、TA、V
+本次更新 5 个品种
+
+取数窗口: 2026-11-03 ~ 2026-11-15（过去 12 天）
+
+M    DCE    段 66->66   末段 m2701      数据到 2026-11-13
+RB   SHFE   段 73->73   末段 rb2701     数据到 2026-11-13
+SR   CZCE   段 62->62   末段 SR2701     数据到 2026-11-13
+TA   CZCE   段 78->78   末段 TA2701     数据到 2026-11-13
+V    DCE    段 78->78   末段 v2701      数据到 2026-11-13
+全量保护：品种 84 个全部保留，历史段逐字节一致，anchor 未变（2026-09-01）
+
+data_through: 2026-11-11 -> 2026-11-13
+dry-run，未写文件
+结果: rc=0 state=dryrun data_through 2026-11-11 -> 2026-11-11 anchor=2026-09-01 品种=84 新增=0
+[2026-11-15 17:59:11] 结束
+

@@ -56,6 +56,38 @@ class MonitorWriter:
             if "delay_ms" in tcols:
                 conn.exec_driver_sql("ALTER TABLE trades DROP COLUMN delay_ms")
 
+            # 锁仓已移除：strategy_status 不再写 long_pos/short_pos。老库里这两列
+            # 是 NOT NULL 且无默认值，不删掉的话新代码的 INSERT 会整条失败。
+            scols = {
+                r[1]
+                for r in conn.exec_driver_sql("PRAGMA table_info(strategy_status)")
+            }
+            for col in ("long_pos", "short_pos"):
+                if col in scols:
+                    conn.exec_driver_sql(
+                        f"ALTER TABLE strategy_status DROP COLUMN {col}"
+                    )
+
+            # settlements 增加 account（老库没有；新库由 create_all 直接建好）
+            stcols = {
+                r[1]
+                for r in conn.exec_driver_sql("PRAGMA table_info(settlements)")
+            }
+            if stcols and "account" not in stcols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE settlements "
+                    "ADD COLUMN account VARCHAR(16) DEFAULT ''"
+                )
+
+            # contracts 增加 margin_rate（openctp 保证金率；老库没有）
+            ccols = {
+                r[1] for r in conn.exec_driver_sql("PRAGMA table_info(contracts)")
+            }
+            if ccols and "margin_rate" not in ccols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE contracts ADD COLUMN margin_rate FLOAT DEFAULT 0"
+                )
+
     def write(self, obj) -> None:
         """Enqueue a model instance; never blocks the caller."""
         self._queue.put((obj, False))

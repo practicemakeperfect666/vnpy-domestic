@@ -42,13 +42,9 @@ cd vnpy-domestic
 sudo apt update
 sudo apt install -y build-essential ninja-build
 
-# vnpy 核心
-pip install vnpy vnpy_ctastrategy vnpy_ctp vnpy_sqlite
-
-# 本项目依赖
-pip install pyyaml requests akshare psutil pandas lark-oapi fastapi uvicorn
-
 # 安装本包（editable 模式，改代码不用重装）
+# pyproject.toml 已声明 vnpy / vnpy_ctastrategy / vnpy_ctp / vnpy_sqlite
+# 以及 pyyaml / requests / akshare / psutil / lark-oapi / fastapi / uvicorn 等全部依赖
 pip install -e .
 
 # ⚠️ 生成中文 locale：vnpy_ctp 是 C++ 扩展，运行时 CTP 库要创建 zh_CN locale，
@@ -304,3 +300,53 @@ run_cta 主循环（1s 轮询）→ stop_all_strategies / init+start
 - 控制线程随 run_cta 子进程运行，只在交易时段在线（非交易时段子进程退出）
 - 不配置 `feishu_app_id` 则控制功能静默关闭，通知不受影响
 - `verification_token` 必填（验签），`encrypt_key` 后台没开加密可留空
+
+## 12. 换月复权表自更新（可选）
+
+`run_cta.py` 里的守护线程靠交易进程自己起子进程，**只在交易机本机跑时有效**。Linux 上如果
+也想让交易机自己更新表（不依赖回测仓、不依赖 git 分发），用 systemd timer 在收盘后跑一次：
+
+```ini
+# /etc/systemd/system/vnpy-rollover.service
+[Unit]
+Description=vnpy rollover table daily update
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/vnpy-domestic
+ExecStart=/home/ubuntu/miniconda3/envs/vnpy/bin/python /home/ubuntu/vnpy-domestic/scripts/rollover_daily.py
+```
+
+```ini
+# /etc/systemd/system/vnpy-rollover.timer
+[Unit]
+Description=Run rollover update after close (Mon-Fri 17:30)
+
+[Timer]
+OnCalendar=Mon..Fri 17:30
+Persistent=true
+Unit=vnpy-rollover.service
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now vnpy-rollover.timer
+systemctl list-timers vnpy-rollover.timer        # 确认下次触发时间
+journalctl -u vnpy-rollover.service -n 50        # 看上次执行
+```
+
+**注意**
+
+- 17:30 是因为 `get_futures_daily` 取的是交易所**结算后**数据，15:30 往往还没齐
+- 脚本自带单实例文件锁（系统临时目录下 `vnpy_rollover_update.lock`），和交易进程内的守护线程
+  同时跑也不会互相踩
+- 只更新「实际在交易的品种」（从 `.vntrader/cta_strategy_setting.json` 读），只取最近 12 天日线，
+  增量追加、历史段不动，写完做四项全量保护校验（品种数/段数/历史段/anchor）
+- 日志在 `scripts/logs/rollover_update_YYYYMM.log`，飞书会收到「已更新 / 已推进 / 失败」通知
+- 只想确认主力有没有变、不想动表：跑 `scripts/rollover_check.py`（约 20 秒，只读，
+  退出码 `0`=无变化 `10`=需要更新 `1`=取数失败）

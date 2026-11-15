@@ -38,6 +38,11 @@ def load_feishu_control() -> dict:
             with open(p, encoding="utf-8") as f:
                 secrets = yaml.safe_load(f) or {}
             break
+    try:
+        port = int(secrets.get("feishu_port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+
     return {
         "app_id": secrets.get("feishu_app_id", ""),
         "app_secret": secrets.get("feishu_app_secret", ""),
@@ -46,6 +51,8 @@ def load_feishu_control() -> dict:
         "bot_open_id": secrets.get("feishu_bot_open_id", ""),
         "host": secrets.get("feishu_host", "127.0.0.1"),
         "public_url": secrets.get("feishu_public_url", ""),
+        # 控制服务端口；0 表示按账户默认（实盘 3000 / 模拟盘 3001）
+        "port": port,
     }
 
 
@@ -75,32 +82,30 @@ def reply_text(app_id, app_secret, msg_id, text):
 
 
 def build_control_app(
-    ctrl_queue, app_id, app_secret, encrypt_key, verification_token, bot_open_id
+    ctrl_queue,
+    app_id,
+    app_secret,
+    encrypt_key,
+    verification_token,
+    bot_open_id,
+    account: str = "real",
 ):
-    """构建 FastAPI app：回调验签解密 + 指令入队 + 回复"""
+    """构建 FastAPI app：回调验签解密 + 指令入队 + 回复。
+
+    account 是这个机器人绑定的账户（"real"/"simnow"），用来校验指令里写的
+    实盘/模拟盘有没有 @ 错机器人。
+    """
+    account = "simnow" if str(account).lower() == "simnow" else "real"
+    my_label = "模拟盘" if account == "simnow" else "实盘"
+
+    def _label(acc: str) -> str:
+        return "模拟盘" if acc == "simnow" else "实盘"
+
     import lark_oapi as lark
     from fastapi import FastAPI, Request
     from fastapi.responses import Response
-    from lark_oapi.api.im.v1 import (
-        P2ImMessageReceiveV1,
-        ReplyMessageRequest,
-        ReplyMessageRequestBody,
-    )
+    from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
     from lark_oapi.core.model import RawRequest
-
-    def _reply(client, msg_id, text):
-        req = (
-            ReplyMessageRequest.builder()
-            .message_id(msg_id)
-            .request_body(
-                ReplyMessageRequestBody.builder()
-                .msg_type("text")
-                .content(json.dumps({"text": text}))
-                .build()
-            )
-            .build()
-        )
-        client.im.v1.message.reply(req)
 
     def _is_mentioned(mentions):
         for m in mentions or []:
@@ -132,18 +137,41 @@ def build_control_app(
         text = content.get("text", "").strip()
         for m in mentions:
             text = text.replace(m.key, "").strip()
-        logger.info(f"[飞书控制] 识别文本: {text!r}")
+        logger.info(f"[飞书控制] 识别文本: {text!r}（本机器人={my_label}）")
 
-        client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
-        cmd = text.lower()
-        if "停止" in cmd:
-            ctrl_queue.put(("stop", msg.message_id))
-            _reply(client, msg.message_id, "收到停止指令，执行中...")
-        elif "重启" in cmd:
-            ctrl_queue.put(("restart", msg.message_id))
-            _reply(client, msg.message_id, "收到重启指令，执行中...")
-        else:
-            _reply(client, msg.message_id, "收到信息")
+        action = "stop" if "停止" in text else "restart" if "重启" in text else ""
+        said = []
+        if "实盘" in text:
+            said.append("real")
+        if "模拟" in text:
+            said.append("simnow")
+
+        if not action:
+            ctrl_queue.put((
+                "say",
+                "无法识别指令。用法：@机器人 停止 / 重启"
+                f"（本机器人是「{my_label}」）",
+                msg.message_id,
+            ))
+            return
+        if len(said) > 1:
+            ctrl_queue.put((
+                "say",
+                "⚠️ 指令里同时出现了「实盘」和「模拟盘」，请只写一个。",
+                msg.message_id,
+            ))
+            return
+        if said and said[0] != account:
+            other = _label(said[0])
+            ctrl_queue.put((
+                "say",
+                f"⚠️ 你 @ 的是「{my_label}」机器人，但指令写的是「{other}」。\n"
+                f"  {other}的操作请 @{other}机器人。",
+                msg.message_id,
+            ))
+            return
+
+        ctrl_queue.put(("do", action, msg.message_id))
 
     # 注意：on_message 必须先定义再 register（否则 NameError）
     event_handler = (
