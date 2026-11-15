@@ -641,7 +641,8 @@ vnpy-domestic/
 │   ├── cleanup_monitor.py              ← monitor.db 清理（按天删历史快照）
 │   ├── rollover_check.py               ← 换月表：确认主力有没有变（约 20 秒，只读）
 │   ├── rollover_daily.py               ← 换月表：增量更新 + 飞书通知 + 日志
-│   └── rollover_daily.bat              ← 每日更新入口（计划任务/手动）
+│   ├── rollover_daily.bat              ← 每日更新入口（计划任务/手动）
+│   └── strategy_selftest.py            ← 离线自测：不开行情验证策略能否初始化
 │
 ├── vnpy_domestic/
 │   ├── __init__.py                     ← 导出 MyBarGenerator，注册 akshare 别名

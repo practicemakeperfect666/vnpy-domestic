@@ -27,3 +27,6 @@ Thumbs.db
 
 # uv
 uv.lock
+
+# 改动前的备份（脚本自动生成）
+*.bak.*
